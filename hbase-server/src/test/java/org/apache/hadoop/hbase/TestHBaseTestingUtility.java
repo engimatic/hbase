@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +17,6 @@
  */
 package org.apache.hadoop.hbase;
 
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -34,7 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Random;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -49,6 +46,7 @@ import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -64,6 +62,11 @@ import org.slf4j.LoggerFactory;
  */
 @Category({MiscTests.class, LargeTests.class})
 public class TestHBaseTestingUtility {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestHBaseTestingUtility.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestHBaseTestingUtility.class);
 
   @Rule
@@ -75,7 +78,7 @@ public class TestHBaseTestingUtility {
    * that what we insert in one place doesn't end up in the other.
    * @throws Exception
    */
-  @Test (timeout=180000)
+  @Test
   public void testMultiClusters() throws Exception {
     // Create three clusters
 
@@ -433,58 +436,39 @@ public class TestHBaseTestingUtility {
   }
 
   @Test
-  public void testOverridingOfDefaultPorts() {
+  public void testOverridingOfDefaultPorts() throws Exception {
 
-    // confirm that default port properties being overridden to "-1"
+    // confirm that default port properties being overridden to random
     Configuration defaultConfig = HBaseConfiguration.create();
     defaultConfig.setInt(HConstants.MASTER_INFO_PORT, HConstants.DEFAULT_MASTER_INFOPORT);
-    defaultConfig.setInt(HConstants.REGIONSERVER_PORT, HConstants.DEFAULT_REGIONSERVER_PORT);
+    defaultConfig.setInt(HConstants.REGIONSERVER_INFO_PORT,
+        HConstants.DEFAULT_REGIONSERVER_INFOPORT);
     HBaseTestingUtility htu = new HBaseTestingUtility(defaultConfig);
-    assertEquals(-1, htu.getConfiguration().getInt(HConstants.MASTER_INFO_PORT, 0));
-    assertEquals(-1, htu.getConfiguration().getInt(HConstants.REGIONSERVER_PORT, 0));
+    try {
+      MiniHBaseCluster defaultCluster = htu.startMiniCluster();
+      assertNotEquals(HConstants.DEFAULT_MASTER_INFOPORT,
+          defaultCluster.getConfiguration().getInt(HConstants.MASTER_INFO_PORT, 0));
+      assertNotEquals(HConstants.DEFAULT_REGIONSERVER_INFOPORT,
+          defaultCluster.getConfiguration().getInt(HConstants.REGIONSERVER_INFO_PORT, 0));
+    } finally {
+      htu.shutdownMiniCluster();
+    }
 
     // confirm that nonDefault (custom) port settings are NOT overridden
     Configuration altConfig = HBaseConfiguration.create();
     final int nonDefaultMasterInfoPort = 3333;
     final int nonDefaultRegionServerPort = 4444;
     altConfig.setInt(HConstants.MASTER_INFO_PORT, nonDefaultMasterInfoPort);
-    altConfig.setInt(HConstants.REGIONSERVER_PORT, nonDefaultRegionServerPort);
+    altConfig.setInt(HConstants.REGIONSERVER_INFO_PORT, nonDefaultRegionServerPort);
     htu = new HBaseTestingUtility(altConfig);
-    assertEquals(nonDefaultMasterInfoPort,
-            htu.getConfiguration().getInt(HConstants.MASTER_INFO_PORT, 0));
-    assertEquals(nonDefaultRegionServerPort
-            , htu.getConfiguration().getInt(HConstants.REGIONSERVER_PORT, 0));
-  }
-
-  @Test public void testMRYarnConfigsPopulation() throws IOException {
-    Map<String, String> dummyProps = new HashMap<>();
-    dummyProps.put("mapreduce.jobtracker.address", "dummyhost:11234");
-    dummyProps.put("yarn.resourcemanager.address", "dummyhost:11235");
-    dummyProps.put("mapreduce.jobhistory.address", "dummyhost:11236");
-    dummyProps.put("yarn.resourcemanager.scheduler.address", "dummyhost:11237");
-    dummyProps.put("mapreduce.jobhistory.webapp.address", "dummyhost:11238");
-    dummyProps.put("yarn.resourcemanager.webapp.address", "dummyhost:11239");
-
-    HBaseTestingUtility hbt = new HBaseTestingUtility();
-
-    // populate the mr props to the Configuration instance
-    for (Entry<String, String> entry : dummyProps.entrySet()) {
-      hbt.getConfiguration().set(entry.getKey(), entry.getValue());
+    try {
+      MiniHBaseCluster customCluster = htu.startMiniCluster();
+      assertEquals(nonDefaultMasterInfoPort,
+              customCluster.getConfiguration().getInt(HConstants.MASTER_INFO_PORT, 0));
+      assertEquals(nonDefaultRegionServerPort,
+          customCluster.getConfiguration().getInt(HConstants.REGIONSERVER_INFO_PORT, 0));
+    } finally {
+      htu.shutdownMiniCluster();
     }
-
-    for (Entry<String,String> entry : dummyProps.entrySet()) {
-      assertTrue("The Configuration for key " + entry.getKey() +" and value: " + entry.getValue() +
-                 " is not populated correctly", hbt.getConfiguration().get(entry.getKey()).equals(entry.getValue()));
-    }
-
-    hbt.startMiniMapReduceCluster();
-
-    // Confirm that MiniMapReduceCluster overwrites the mr properties and updates the Configuration
-    for (Entry<String,String> entry : dummyProps.entrySet()) {
-      assertFalse("The MR prop: " + entry.getValue() + " is not overwritten when map reduce mini"+
-                  "cluster is started", hbt.getConfiguration().get(entry.getKey()).equals(entry.getValue()));
-    }
-
-    hbt.shutdownMiniMapReduceCluster();
   }
 }

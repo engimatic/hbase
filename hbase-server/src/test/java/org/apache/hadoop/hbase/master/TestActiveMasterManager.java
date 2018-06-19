@@ -1,5 +1,4 @@
-/*
- *
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -24,11 +23,11 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.util.concurrent.Semaphore;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
@@ -46,6 +45,7 @@ import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.zookeeper.KeeperException;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
@@ -57,6 +57,11 @@ import org.slf4j.LoggerFactory;
  */
 @Category({MasterTests.class, MediumTests.class})
 public class TestActiveMasterManager {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestActiveMasterManager.class);
+
   private final static Logger LOG = LoggerFactory.getLogger(TestActiveMasterManager.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
@@ -74,8 +79,8 @@ public class TestActiveMasterManager {
     ZKWatcher zk = new ZKWatcher(TEST_UTIL.getConfiguration(),
       "testActiveMasterManagerFromZK", null, true);
     try {
-      ZKUtil.deleteNode(zk, zk.znodePaths.masterAddressZNode);
-      ZKUtil.deleteNode(zk, zk.znodePaths.clusterStateZNode);
+      ZKUtil.deleteNode(zk, zk.getZNodePaths().masterAddressZNode);
+      ZKUtil.deleteNode(zk, zk.getZNodePaths().clusterStateZNode);
     } catch(KeeperException.NoNodeException nne) {}
 
     // Create the master node with a dummy address
@@ -116,8 +121,8 @@ public class TestActiveMasterManager {
     ZKWatcher zk = new ZKWatcher(TEST_UTIL.getConfiguration(),
       "testActiveMasterManagerFromZK", null, true);
     try {
-      ZKUtil.deleteNode(zk, zk.znodePaths.masterAddressZNode);
-      ZKUtil.deleteNode(zk, zk.znodePaths.clusterStateZNode);
+      ZKUtil.deleteNode(zk, zk.getZNodePaths().masterAddressZNode);
+      ZKUtil.deleteNode(zk, zk.getZNodePaths().clusterStateZNode);
     } catch(KeeperException.NoNodeException nne) {}
 
     // Create the master node with a dummy address
@@ -162,11 +167,12 @@ public class TestActiveMasterManager {
     ms1.stop("stopping first server");
 
     // Use a listener to capture when the node is actually deleted
-    NodeDeletionListener listener = new NodeDeletionListener(zk, zk.znodePaths.masterAddressZNode);
+    NodeDeletionListener listener = new NodeDeletionListener(zk,
+            zk.getZNodePaths().masterAddressZNode);
     zk.registerListener(listener);
 
     LOG.info("Deleting master node");
-    ZKUtil.deleteNode(zk, zk.znodePaths.masterAddressZNode);
+    ZKUtil.deleteNode(zk, zk.getZNodePaths().masterAddressZNode);
 
     // Wait for the node to be deleted
     LOG.info("Waiting for active master manager to be notified");
@@ -186,7 +192,7 @@ public class TestActiveMasterManager {
     assertTrue(t.isActiveMaster);
 
     LOG.info("Deleting master node");
-    ZKUtil.deleteNode(zk, zk.znodePaths.masterAddressZNode);
+    ZKUtil.deleteNode(zk, zk.getZNodePaths().masterAddressZNode);
   }
 
   /**

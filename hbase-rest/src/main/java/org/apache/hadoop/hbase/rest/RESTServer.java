@@ -26,11 +26,6 @@ import java.util.EnumSet;
 import java.util.concurrent.ArrayBlockingQueue;
 
 import com.fasterxml.jackson.jaxrs.json.JacksonJaxbJsonProvider;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
@@ -50,6 +45,11 @@ import org.apache.hadoop.hbase.util.VersionInfo;
 import org.apache.hadoop.util.StringUtils;
 
 import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Options;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.ParseException;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.PosixParser;
 
 import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.server.Server;
@@ -94,6 +94,10 @@ public class RESTServer implements Constants {
   static String REST_CSRF_METHODS_TO_IGNORE_DEFAULT = "GET,OPTIONS,HEAD,TRACE";
 
   private static final String PATH_SPEC_ANY = "/*";
+
+  static String REST_HTTP_ALLOW_OPTIONS_METHOD = "hbase.rest.http.allow.options.method";
+  // HTTP OPTIONS method is commonly used in REST APIs for negotiation. So it is enabled by default.
+  private static boolean REST_HTTP_ALLOW_OPTIONS_METHOD_DEFAULT = true;
 
   private static void printUsageAndExit(Options options, int exitCode) {
     HelpFormatter formatter = new HelpFormatter();
@@ -341,7 +345,8 @@ public class RESTServer implements Constants {
       ctxHandler.addFilter(filter, PATH_SPEC_ANY, EnumSet.of(DispatcherType.REQUEST));
     }
     addCSRFFilter(ctxHandler, conf);
-    HttpServerUtil.constrainHttpMethods(ctxHandler);
+    HttpServerUtil.constrainHttpMethods(ctxHandler, servlet.getConfiguration()
+        .getBoolean(REST_HTTP_ALLOW_OPTIONS_METHOD, REST_HTTP_ALLOW_OPTIONS_METHOD_DEFAULT));
 
     // Put up info server.
     int port = conf.getInt("hbase.rest.info.port", 8085);

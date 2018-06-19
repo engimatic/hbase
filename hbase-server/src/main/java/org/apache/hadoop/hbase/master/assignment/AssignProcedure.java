@@ -26,7 +26,6 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RetriesExhaustedException;
-import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
 import org.apache.hadoop.hbase.master.RegionState.State;
 import org.apache.hadoop.hbase.master.TableStateManager;
@@ -135,6 +134,9 @@ public class AssignProcedure extends RegionTransitionProcedure {
     if (this.targetServer != null) {
       state.setTargetServer(ProtobufUtil.toServerName(this.targetServer));
     }
+    if (getAttempt() > 0) {
+      state.setAttempt(getAttempt());
+    }
     serializer.serialize(state.build());
   }
 
@@ -148,6 +150,9 @@ public class AssignProcedure extends RegionTransitionProcedure {
     if (state.hasTargetServer()) {
       this.targetServer = ProtobufUtil.toServerName(state.getTargetServer());
     }
+    if (state.hasAttempt()) {
+      setAttempt(state.getAttempt());
+    }
   }
 
   @Override
@@ -158,15 +163,15 @@ public class AssignProcedure extends RegionTransitionProcedure {
       LOG.info("Assigned, not reassigning; " + this + "; " + regionNode.toShortString());
       return false;
     }
-    // Don't assign if table is in disabling of disabled state.
+    // Don't assign if table is in disabling or disabled state.
     TableStateManager tsm = env.getMasterServices().getTableStateManager();
     TableName tn = regionNode.getRegionInfo().getTable();
-    if (tsm.isTableState(tn, TableState.State.DISABLING, TableState.State.DISABLED)) {
+    if (tsm.getTableState(tn).isDisabledOrDisabling()) {
       LOG.info("Table " + tn + " state=" + tsm.getTableState(tn) + ", skipping " + this);
       return false;
     }
     // If the region is SPLIT, we can't assign it. But state might be CLOSED, rather than
-    // SPLIT which is what a region gets set to when Unassigned as part of SPLIT. FIX.
+    // SPLIT which is what a region gets set to when unassigned as part of SPLIT. FIX.
     if (regionNode.isInState(State.SPLIT) ||
         (regionNode.getRegionInfo().isOffline() && regionNode.getRegionInfo().isSplit())) {
       LOG.info("SPLIT, cannot be assigned; " + this + "; " + regionNode +
@@ -186,10 +191,12 @@ public class AssignProcedure extends RegionTransitionProcedure {
       return false;
     }
 
-    // Send assign (add into assign-pool). Region is now in OFFLINE state. Setting offline state
-    // scrubs what was the old region location. Setting a new regionLocation here is how we retain
+    // Send assign (add into assign-pool). We call regionNode.offline below to set state to
+    // OFFLINE and to clear the region location. Setting a new regionLocation here is how we retain
     // old assignment or specify target server if a move or merge. See
     // AssignmentManager#processAssignQueue. Otherwise, balancer gives us location.
+    // TODO: Region will be set into OFFLINE state below regardless of what its previous state was
+    // This is dangerous? Wrong? What if region was in an unexpected state?
     ServerName lastRegionLocation = regionNode.offline();
     boolean retain = false;
     if (!forceNewPlan) {
@@ -208,7 +215,7 @@ public class AssignProcedure extends RegionTransitionProcedure {
         }
       }
     }
-    LOG.info("Start " + this + "; " + regionNode.toShortString() +
+    LOG.info("Starting " + this + "; " + regionNode.toShortString() +
         "; forceNewPlan=" + this.forceNewPlan +
         ", retain=" + retain);
     env.getAssignmentManager().queueAssign(regionNode);
@@ -286,8 +293,9 @@ public class AssignProcedure extends RegionTransitionProcedure {
         if (openSeqNum < regionNode.getOpenSeqNum()) {
           LOG.warn("Skipping update of open seqnum with " + openSeqNum +
               " because current seqnum=" + regionNode.getOpenSeqNum());
+        } else {
+          regionNode.setOpenSeqNum(openSeqNum);
         }
-        regionNode.setOpenSeqNum(openSeqNum);
         // Leave the state here as OPENING for now. We set it to OPEN in
         // REGION_TRANSITION_FINISH section where we do a bunch of checks.
         // regionNode.setState(RegionState.State.OPEN, RegionState.State.OPENING);

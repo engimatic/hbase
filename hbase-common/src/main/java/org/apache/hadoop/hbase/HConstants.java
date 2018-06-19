@@ -89,6 +89,7 @@ public final class HConstants {
     NOT_RUN,
     SUCCESS,
     BAD_FAMILY,
+    STORE_TOO_BUSY,
     SANITY_CHECK_FAILURE,
     FAILURE
   }
@@ -182,6 +183,19 @@ public final class HConstants {
   /** Name of ZooKeeper quorum configuration parameter. */
   public static final String ZOOKEEPER_QUORUM = "hbase.zookeeper.quorum";
 
+  /** Name of ZooKeeper quorum configuration parameter for client to locate meta. */
+  public static final String CLIENT_ZOOKEEPER_QUORUM = "hbase.client.zookeeper.quorum";
+
+  /** Client port of ZooKeeper for client to locate meta */
+  public static final String CLIENT_ZOOKEEPER_CLIENT_PORT =
+      "hbase.client.zookeeper.property.clientPort";
+
+  /** Indicate whether the client ZK are observer nodes of the server ZK */
+  public static final String CLIENT_ZOOKEEPER_OBSERVER_MODE =
+      "hbase.client.zookeeper.observer.mode";
+  /** Assuming client zk not in observer mode and master need to synchronize information */
+  public static final boolean DEFAULT_CLIENT_ZOOKEEPER_OBSERVER_MODE = false;
+
   /** Common prefix of ZooKeeper configuration properties */
   public static final String ZK_CFG_PROPERTY_PREFIX =
       "hbase.zookeeper.property.";
@@ -200,7 +214,7 @@ public final class HConstants {
       ZK_CFG_PROPERTY_PREFIX + CLIENT_PORT_STR;
 
   /** Default client port that the zookeeper listens on */
-  public static final int DEFAULT_ZOOKEPER_CLIENT_PORT = 2181;
+  public static final int DEFAULT_ZOOKEEPER_CLIENT_PORT = 2181;
 
   /** Parameter name for the root dir in ZK for this cluster */
   public static final String ZOOKEEPER_ZNODE_PARENT = "zookeeper.znode.parent";
@@ -223,7 +237,7 @@ public final class HConstants {
       ZK_CFG_PROPERTY_PREFIX + "tickTime";
 
   /** Default limit on concurrent client-side zookeeper connections */
-  public static final int DEFAULT_ZOOKEPER_MAX_CLIENT_CNXNS = 300;
+  public static final int DEFAULT_ZOOKEEPER_MAX_CLIENT_CNXNS = 300;
 
   /** Configuration key for ZooKeeper session timeout */
   public static final String ZK_SESSION_TIMEOUT = "zookeeper.session.timeout";
@@ -431,27 +445,6 @@ public final class HConstants {
   /** The catalog family */
   public static final byte [] CATALOG_FAMILY = Bytes.toBytes(CATALOG_FAMILY_STR);
 
-  /** The replication barrier family as a string*/
-  public static final String REPLICATION_BARRIER_FAMILY_STR = "rep_barrier";
-
-  /** The replication barrier family */
-  public static final byte [] REPLICATION_BARRIER_FAMILY =
-      Bytes.toBytes(REPLICATION_BARRIER_FAMILY_STR);
-
-  /** The replication position family as a string*/
-  public static final String REPLICATION_POSITION_FAMILY_STR = "rep_position";
-
-  /** The replication position family */
-  public static final byte [] REPLICATION_POSITION_FAMILY =
-      Bytes.toBytes(REPLICATION_POSITION_FAMILY_STR);
-
-  /** The replication meta family as a string*/
-  public static final String REPLICATION_META_FAMILY_STR = "rep_meta";
-
-  /** The replication meta family */
-  public static final byte [] REPLICATION_META_FAMILY =
-      Bytes.toBytes(REPLICATION_META_FAMILY_STR);
-
   /** The RegionInfo qualifier as a string */
   public static final String REGIONINFO_QUALIFIER_STR = "regioninfo";
 
@@ -508,6 +501,12 @@ public final class HConstants {
   /** The serialized table state qualifier */
   public static final byte[] TABLE_STATE_QUALIFIER = Bytes.toBytes("state");
 
+  /** The replication barrier family as a string*/
+  public static final String REPLICATION_BARRIER_FAMILY_STR = "rep_barrier";
+
+  /** The replication barrier family */
+  public static final byte[] REPLICATION_BARRIER_FAMILY =
+      Bytes.toBytes(REPLICATION_BARRIER_FAMILY_STR);
 
   /**
    * The meta table version column qualifier.
@@ -660,12 +659,6 @@ public final class HConstants {
    * This data will be replicated to all peers.
    */
   public static final int REPLICATION_SCOPE_GLOBAL = 1;
-
-  /**
-   * Scope tag for serially scoped data
-   * This data will be replicated to all peers by the order of sequence id.
-   */
-  public static final int REPLICATION_SCOPE_SERIAL = 2;
 
   /**
    * Default cluster ID, cannot be used to identify a cluster so a key with
@@ -917,12 +910,6 @@ public final class HConstants {
   public static final boolean REPLICATION_BULKLOAD_ENABLE_DEFAULT = false;
   /** Replication cluster id of source cluster which uniquely identifies itself with peer cluster */
   public static final String REPLICATION_CLUSTER_ID = "hbase.replication.cluster.id";
-
-  public static final String
-      REPLICATION_SERIALLY_WAITING_KEY = "hbase.serial.replication.waitingMs";
-  public static final long
-      REPLICATION_SERIALLY_WAITING_DEFAULT = 10000;
-
   /**
    * Max total size of buffered entries in all replication peers. It will prevent server getting
    * OOM if there are many peers. Default value is 256MB which is four times to default
@@ -967,6 +954,10 @@ public final class HConstants {
     */
   public static final float HBASE_CLUSTER_MINIMUM_MEMORY_THRESHOLD = 0.2f;
 
+  /**
+   * @deprecated  It is used internally. As of release 2.0.0, this will be removed in HBase 3.0.0.
+   */
+  @Deprecated
   public static final Pattern CP_HTD_ATTR_KEY_PATTERN =
       Pattern.compile("^coprocessor\\$([0-9]+)$", Pattern.CASE_INSENSITIVE);
 
@@ -977,12 +968,25 @@ public final class HConstants {
    * where arguments are {@code <KEY> '=' <VALUE> [,...]}
    * For example: {@code hdfs:///foo.jar|com.foo.FooRegionObserver|1001|arg1=1,arg2=2}
    * </pre>
+   * @deprecated  It is used internally. As of release 2.0.0, this will be removed in HBase 3.0.0.
    */
+  @Deprecated
   public static final Pattern CP_HTD_ATTR_VALUE_PATTERN =
       Pattern.compile("(^[^\\|]*)\\|([^\\|]+)\\|[\\s]*([\\d]*)[\\s]*(\\|.*)?$");
-
+  /**
+   * @deprecated  It is used internally. As of release 2.0.0, this will be removed in HBase 3.0.0.
+   */
+  @Deprecated
   public static final String CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN = "[^=,]+";
+  /**
+   * @deprecated  It is used internally. As of release 2.0.0, this will be removed in HBase 3.0.0.
+   */
+  @Deprecated
   public static final String CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN = "[^,]+";
+  /**
+   * @deprecated  It is used internally. As of release 2.0.0, this will be removed in HBase 3.0.0.
+   */
+  @Deprecated
   public static final Pattern CP_HTD_ATTR_VALUE_PARAM_PATTERN = Pattern.compile(
       "(" + CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN + ")=(" +
       CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN + "),?");

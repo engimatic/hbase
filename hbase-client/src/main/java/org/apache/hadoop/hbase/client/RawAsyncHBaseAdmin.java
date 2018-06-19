@@ -36,12 +36,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.AsyncMetaTableAccessor;
+import org.apache.hadoop.hbase.CacheEvictionStats;
+import org.apache.hadoop.hbase.CacheEvictionStatsAggregator;
 import org.apache.hadoop.hbase.ClusterMetrics;
 import org.apache.hadoop.hbase.ClusterMetrics.Option;
 import org.apache.hadoop.hbase.ClusterMetricsBuilder;
@@ -97,6 +100,8 @@ import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ClearCompactionQueuesRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ClearCompactionQueuesResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ClearRegionBlockCacheRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ClearRegionBlockCacheResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CompactRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CompactRegionResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.FlushRegionRequest;
@@ -409,7 +414,7 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
   }
 
   /**
-   * {@link #listTables(boolean)}
+   * {@link #listTableDescriptors(boolean)}
    */
   @Override
   public CompletableFuture<List<TableDescriptor>> listTableDescriptors(Pattern pattern,
@@ -822,22 +827,51 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
               .toStringBinary(regionName)));
           return;
         }
-
-        RegionInfo regionInfo = location.getRegion();
-        this.<Void> newAdminCaller()
-            .serverName(serverName)
-            .action(
-              (controller, stub) -> this.<FlushRegionRequest, FlushRegionResponse, Void> adminCall(
-                controller, stub, RequestConverter.buildFlushRegionRequest(regionInfo
-                    .getRegionName()), (s, c, req, done) -> s.flushRegion(c, req, done),
-                resp -> null)).call().whenComplete((ret, err2) -> {
+        flush(serverName, location.getRegion())
+          .whenComplete((ret, err2) -> {
               if (err2 != null) {
                 future.completeExceptionally(err2);
               } else {
                 future.complete(ret);
               }
-            });
+          });
       });
+    return future;
+  }
+
+  private CompletableFuture<Void> flush(final ServerName serverName, final RegionInfo regionInfo) {
+    return this.<Void> newAdminCaller()
+            .serverName(serverName)
+            .action(
+              (controller, stub) -> this.<FlushRegionRequest, FlushRegionResponse, Void> adminCall(
+                controller, stub, RequestConverter.buildFlushRegionRequest(regionInfo
+                  .getRegionName()), (s, c, req, done) -> s.flushRegion(c, req, done),
+                resp -> null))
+            .call();
+  }
+
+  @Override
+  public CompletableFuture<Void> flushRegionServer(ServerName sn) {
+    CompletableFuture<Void> future = new CompletableFuture<>();
+    getRegions(sn).whenComplete((hRegionInfos, err) -> {
+      if (err != null) {
+        future.completeExceptionally(err);
+        return;
+      }
+      List<CompletableFuture<Void>> compactFutures = new ArrayList<>();
+      if (hRegionInfos != null) {
+        hRegionInfos.forEach(region -> compactFutures.add(flush(sn, region)));
+      }
+      CompletableFuture
+        .allOf(compactFutures.toArray(new CompletableFuture<?>[compactFutures.size()]))
+        .whenComplete((ret, err2) -> {
+          if (err2 != null) {
+            future.completeExceptionally(err2);
+          } else {
+            future.complete(ret);
+          }
+        });
+    });
     return future;
   }
 
@@ -1525,47 +1559,34 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
   @Override
   public CompletableFuture<Void> addReplicationPeer(String peerId,
       ReplicationPeerConfig peerConfig, boolean enabled) {
-    return this
-        .<Void> newMasterCaller()
-        .action(
-          (controller, stub) -> this
-              .<AddReplicationPeerRequest, AddReplicationPeerResponse, Void> call(controller, stub,
-                RequestConverter.buildAddReplicationPeerRequest(peerId, peerConfig, enabled), (s,
-                    c, req, done) -> s.addReplicationPeer(c, req, done), (resp) -> null)).call();
+    return this.<AddReplicationPeerRequest, AddReplicationPeerResponse> procedureCall(
+      RequestConverter.buildAddReplicationPeerRequest(peerId, peerConfig, enabled),
+      (s, c, req, done) -> s.addReplicationPeer(c, req, done), (resp) -> resp.getProcId(),
+      new ReplicationProcedureBiConsumer(peerId, () -> "ADD_REPLICATION_PEER"));
   }
 
   @Override
   public CompletableFuture<Void> removeReplicationPeer(String peerId) {
-    return this
-        .<Void> newMasterCaller()
-        .action(
-          (controller, stub) -> this
-              .<RemoveReplicationPeerRequest, RemoveReplicationPeerResponse, Void> call(controller,
-                stub, RequestConverter.buildRemoveReplicationPeerRequest(peerId),
-                (s, c, req, done) -> s.removeReplicationPeer(c, req, done), (resp) -> null)).call();
+    return this.<RemoveReplicationPeerRequest, RemoveReplicationPeerResponse> procedureCall(
+      RequestConverter.buildRemoveReplicationPeerRequest(peerId),
+      (s, c, req, done) -> s.removeReplicationPeer(c, req, done), (resp) -> resp.getProcId(),
+      new ReplicationProcedureBiConsumer(peerId, () -> "REMOVE_REPLICATION_PEER"));
   }
 
   @Override
   public CompletableFuture<Void> enableReplicationPeer(String peerId) {
-    return this
-        .<Void> newMasterCaller()
-        .action(
-          (controller, stub) -> this
-              .<EnableReplicationPeerRequest, EnableReplicationPeerResponse, Void> call(controller,
-                stub, RequestConverter.buildEnableReplicationPeerRequest(peerId),
-                (s, c, req, done) -> s.enableReplicationPeer(c, req, done), (resp) -> null)).call();
+    return this.<EnableReplicationPeerRequest, EnableReplicationPeerResponse> procedureCall(
+      RequestConverter.buildEnableReplicationPeerRequest(peerId),
+      (s, c, req, done) -> s.enableReplicationPeer(c, req, done), (resp) -> resp.getProcId(),
+      new ReplicationProcedureBiConsumer(peerId, () -> "ENABLE_REPLICATION_PEER"));
   }
 
   @Override
   public CompletableFuture<Void> disableReplicationPeer(String peerId) {
-    return this
-        .<Void> newMasterCaller()
-        .action(
-          (controller, stub) -> this
-              .<DisableReplicationPeerRequest, DisableReplicationPeerResponse, Void> call(
-                controller, stub, RequestConverter.buildDisableReplicationPeerRequest(peerId), (s,
-                    c, req, done) -> s.disableReplicationPeer(c, req, done), (resp) -> null))
-        .call();
+    return this.<DisableReplicationPeerRequest, DisableReplicationPeerResponse> procedureCall(
+      RequestConverter.buildDisableReplicationPeerRequest(peerId),
+      (s, c, req, done) -> s.disableReplicationPeer(c, req, done), (resp) -> resp.getProcId(),
+      new ReplicationProcedureBiConsumer(peerId, () -> "DISABLE_REPLICATION_PEER"));
   }
 
   @Override
@@ -1584,13 +1605,11 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
   public CompletableFuture<Void> updateReplicationPeerConfig(String peerId,
       ReplicationPeerConfig peerConfig) {
     return this
-        .<Void> newMasterCaller()
-        .action(
-          (controller, stub) -> this
-              .<UpdateReplicationPeerConfigRequest, UpdateReplicationPeerConfigResponse, Void> call(
-                controller, stub, RequestConverter.buildUpdateReplicationPeerConfigRequest(peerId,
-                  peerConfig), (s, c, req, done) -> s.updateReplicationPeerConfig(c, req, done), (
-                    resp) -> null)).call();
+        .<UpdateReplicationPeerConfigRequest, UpdateReplicationPeerConfigResponse> procedureCall(
+          RequestConverter.buildUpdateReplicationPeerConfigRequest(peerId, peerConfig),
+          (s, c, req, done) -> s.updateReplicationPeerConfig(c, req, done),
+          (resp) -> resp.getProcId(),
+          new ReplicationProcedureBiConsumer(peerId, () -> "UPDATE_REPLICATION_PEER_CONFIG"));
   }
 
   @Override
@@ -2549,6 +2568,30 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     }
   }
 
+  private class ReplicationProcedureBiConsumer extends ProcedureBiConsumer {
+    private final String peerId;
+    private final Supplier<String> getOperation;
+
+    ReplicationProcedureBiConsumer(String peerId, Supplier<String> getOperation) {
+      this.peerId = peerId;
+      this.getOperation = getOperation;
+    }
+
+    String getDescription() {
+      return "Operation: " + getOperation.get() + ", peerId: " + peerId;
+    }
+
+    @Override
+    void onFinished() {
+      LOG.info(getDescription() + " completed");
+    }
+
+    @Override
+    void onError(Throwable error) {
+      LOG.info(getDescription() + " failed with " + error.getMessage());
+    }
+  }
+
   private CompletableFuture<Void> waitProcedureResult(CompletableFuture<Long> procFuture) {
     CompletableFuture<Void> future = new CompletableFuture<>();
     procFuture.whenComplete((procId, error) -> {
@@ -3386,5 +3429,115 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
         }
       });
     return future;
+  }
+
+  @Override
+  public CompletableFuture<CacheEvictionStats> clearBlockCache(TableName tableName) {
+    CompletableFuture<CacheEvictionStats> future = new CompletableFuture<>();
+    getTableHRegionLocations(tableName).whenComplete((locations, err) -> {
+      if (err != null) {
+        future.completeExceptionally(err);
+        return;
+      }
+      Map<ServerName, List<RegionInfo>> regionInfoByServerName =
+          locations.stream().filter(l -> l.getRegion() != null)
+              .filter(l -> !l.getRegion().isOffline()).filter(l -> l.getServerName() != null)
+              .collect(Collectors.groupingBy(l -> l.getServerName(),
+                Collectors.mapping(l -> l.getRegion(), Collectors.toList())));
+      List<CompletableFuture<CacheEvictionStats>> futures = new ArrayList<>();
+      CacheEvictionStatsAggregator aggregator = new CacheEvictionStatsAggregator();
+      for (Map.Entry<ServerName, List<RegionInfo>> entry : regionInfoByServerName.entrySet()) {
+        futures
+            .add(clearBlockCache(entry.getKey(), entry.getValue()).whenComplete((stats, err2) -> {
+              if (err2 != null) {
+                future.completeExceptionally(err2);
+              } else {
+                aggregator.append(stats);
+              }
+            }));
+      }
+      CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
+          .whenComplete((ret, err3) -> {
+            if (err3 != null) {
+              future.completeExceptionally(err3);
+            } else {
+              future.complete(aggregator.sum());
+            }
+          });
+    });
+    return future;
+  }
+
+  @Override
+  public CompletableFuture<Void> cloneTableSchema(TableName tableName, TableName newTableName,
+      boolean preserveSplits) {
+    CompletableFuture<Void> future = new CompletableFuture<>();
+    tableExists(tableName).whenComplete(
+      (exist, err) -> {
+        if (err != null) {
+          future.completeExceptionally(err);
+          return;
+        }
+        if (!exist) {
+          future.completeExceptionally(new TableNotFoundException(tableName));
+          return;
+        }
+        tableExists(newTableName).whenComplete(
+          (exist1, err1) -> {
+            if (err1 != null) {
+              future.completeExceptionally(err1);
+              return;
+            }
+            if (exist1) {
+              future.completeExceptionally(new TableExistsException(newTableName));
+              return;
+            }
+            getDescriptor(tableName).whenComplete(
+              (tableDesc, err2) -> {
+                if (err2 != null) {
+                  future.completeExceptionally(err2);
+                  return;
+                }
+                TableDescriptor newTableDesc
+                    = TableDescriptorBuilder.copy(newTableName, tableDesc);
+                if (preserveSplits) {
+                  getTableSplits(tableName).whenComplete((splits, err3) -> {
+                    if (err3 != null) {
+                      future.completeExceptionally(err3);
+                    } else {
+                      createTable(newTableDesc, splits).whenComplete(
+                        (result, err4) -> {
+                          if (err4 != null) {
+                            future.completeExceptionally(err4);
+                          } else {
+                            future.complete(result);
+                          }
+                        });
+                    }
+                  });
+                } else {
+                  createTable(newTableDesc).whenComplete(
+                    (result, err5) -> {
+                      if (err5 != null) {
+                        future.completeExceptionally(err5);
+                      } else {
+                        future.complete(result);
+                      }
+                    });
+                }
+              });
+          });
+      });
+    return future;
+  }
+
+  private CompletableFuture<CacheEvictionStats> clearBlockCache(ServerName serverName,
+      List<RegionInfo> hris) {
+    return this.<CacheEvictionStats> newAdminCaller().action((controller, stub) -> this
+      .<ClearRegionBlockCacheRequest, ClearRegionBlockCacheResponse, CacheEvictionStats> adminCall(
+        controller, stub, RequestConverter.buildClearRegionBlockCacheRequest(hris),
+        (s, c, req, done) -> s.clearRegionBlockCache(controller, req, done),
+        resp -> ProtobufUtil.toCacheEvictionStats(resp.getStats())))
+      .serverName(serverName).call();
   }
 }

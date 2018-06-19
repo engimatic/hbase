@@ -59,7 +59,7 @@ import org.apache.hadoop.hbase.util.Bytes;
  * To only retrieve columns within a specific range of version timestamps, call
  * {@link #setTimeRange(long, long) setTimeRange}.
  * <p>
- * To only retrieve columns with a specific timestamp, call {@link #setTimeStamp(long) setTimestamp}
+ * To only retrieve columns with a specific timestamp, call {@link #setTimestamp(long) setTimestamp}
  * .
  * <p>
  * To limit the number of versions of each column to be returned, call {@link #setMaxVersions(int)
@@ -141,7 +141,7 @@ public class Scan extends Query {
   private long maxResultSize = -1;
   private boolean cacheBlocks = true;
   private boolean reversed = false;
-  private TimeRange tr = new TimeRange();
+  private TimeRange tr = TimeRange.allTime();
   private Map<byte [], NavigableSet<byte []>> familyMap =
     new TreeMap<byte [], NavigableSet<byte []>>(Bytes.BYTES_COMPARATOR);
   private Boolean asyncPrefetch = null;
@@ -279,6 +279,8 @@ public class Scan extends Query {
     this.limit = scan.getLimit();
     this.needCursorResult = scan.isNeedCursorResult();
     setPriority(scan.getPriority());
+    readType = scan.getReadType();
+    super.setReplicaId(scan.getReplicaId());
   }
 
   /**
@@ -310,6 +312,7 @@ public class Scan extends Query {
     }
     this.mvccReadPoint = -1L;
     setPriority(get.getPriority());
+    super.setReplicaId(get.getReplicaId());
   }
 
   public boolean isGetScan() {
@@ -376,16 +379,34 @@ public class Scan extends Query {
    * @see #setMaxVersions()
    * @see #setMaxVersions(int)
    * @return this
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             Use {@link #setTimestamp(long)} instead
    */
+  @Deprecated
   public Scan setTimeStamp(long timestamp)
   throws IOException {
+    return this.setTimestamp(timestamp);
+  }
+
+  /**
+   * Get versions of columns with the specified timestamp. Note, default maximum
+   * versions to return is 1.  If your time range spans more than one version
+   * and you want all versions returned, up the number of versions beyond the
+   * defaut.
+   * @param timestamp version timestamp
+   * @see #setMaxVersions()
+   * @see #setMaxVersions(int)
+   * @return this
+   */
+  public Scan setTimestamp(long timestamp) {
     try {
-      tr = new TimeRange(timestamp, timestamp+1);
+      tr = new TimeRange(timestamp, timestamp + 1);
     } catch(Exception e) {
       // This should never happen, unless integer overflow or something extremely wrong...
       LOG.error("TimeRange failed, likely caused by integer overflow. ", e);
       throw e;
     }
+
     return this;
   }
 
@@ -462,7 +483,7 @@ public class Scan extends Query {
    * @return this
    * @throws IllegalArgumentException if stopRow does not meet criteria for a row key (when length
    *           exceeds {@link HConstants#MAX_ROW_LENGTH})
-   * @deprecated use {@link #withStartRow(byte[])} instead. This method may change the inclusive of
+   * @deprecated use {@link #withStopRow(byte[])} instead. This method may change the inclusive of
    *             the stop row to keep compatible with the old behavior.
    */
   @Deprecated

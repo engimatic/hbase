@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -29,16 +28,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import org.apache.hadoop.hbase.testclassification.IOTests;
-import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.Waiter.ExplainingPredicate;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.hfile.LruBlockCache.EvictionThread;
+import org.apache.hadoop.hbase.testclassification.IOTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.ClassSize;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
@@ -51,6 +52,10 @@ import org.junit.experimental.categories.Category;
  */
 @Category({IOTests.class, SmallTests.class})
 public class TestLruBlockCache {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestLruBlockCache.class);
 
   @Test
   public void testCacheEvictionThreadSafe() throws Exception {
@@ -195,7 +200,7 @@ public class TestLruBlockCache {
     assertEquals(
             "Cache should ignore cache requests for blocks already in cache",
             expectedBlockCount, cache.getBlockCount());
-    
+
     // Verify correctly calculated cache heap size
     assertEquals(expectedCacheSize, cache.heapSize());
 
@@ -280,10 +285,10 @@ public class TestLruBlockCache {
     }
 
     // A single eviction run should have occurred
-    assertEquals(cache.getStats().getEvictionCount(), 1);
+    assertEquals(1, cache.getStats().getEvictionCount());
 
     // We expect two entries evicted
-    assertEquals(cache.getStats().getEvictedCount(), 2);
+    assertEquals(2, cache.getStats().getEvictedCount());
 
     // Our expected size overruns acceptable limit
     assertTrue(expectedCacheSize >
@@ -799,6 +804,59 @@ public class TestLruBlockCache {
     assertEquals(0.5, stats.getHitCachingRatioPastNPeriods(), delta);
   }
 
+  @Test
+  public void testCacheBlockNextBlockMetadataMissing() {
+    long maxSize = 100000;
+    long blockSize = calculateBlockSize(maxSize, 10);
+    int size = 100;
+    int length = HConstants.HFILEBLOCK_HEADER_SIZE + size;
+    byte[] byteArr = new byte[length];
+    ByteBuffer buf = ByteBuffer.wrap(byteArr, 0, size);
+    HFileContext meta = new HFileContextBuilder().build();
+    HFileBlock blockWithNextBlockMetadata = new HFileBlock(BlockType.DATA, size, size, -1, buf,
+        HFileBlock.FILL_HEADER, -1, 52, -1, meta);
+    HFileBlock blockWithoutNextBlockMetadata = new HFileBlock(BlockType.DATA, size, size, -1, buf,
+        HFileBlock.FILL_HEADER, -1, -1, -1, meta);
+
+    LruBlockCache cache = new LruBlockCache(maxSize, blockSize, false,
+        (int)Math.ceil(1.2*maxSize/blockSize),
+        LruBlockCache.DEFAULT_LOAD_FACTOR,
+        LruBlockCache.DEFAULT_CONCURRENCY_LEVEL,
+        0.66f, // min
+        0.99f, // acceptable
+        0.33f, // single
+        0.33f, // multi
+        0.34f, // memory
+        1.2f,  // limit
+        false,
+        1024);
+
+    BlockCacheKey key = new BlockCacheKey("key1", 0);
+    ByteBuffer actualBuffer = ByteBuffer.allocate(length);
+    ByteBuffer block1Buffer = ByteBuffer.allocate(length);
+    ByteBuffer block2Buffer = ByteBuffer.allocate(length);
+    blockWithNextBlockMetadata.serialize(block1Buffer, true);
+    blockWithoutNextBlockMetadata.serialize(block2Buffer, true);
+
+    //Add blockWithNextBlockMetadata, expect blockWithNextBlockMetadata back.
+    CacheTestUtils.getBlockAndAssertEquals(cache, key, blockWithNextBlockMetadata, actualBuffer,
+        block1Buffer);
+
+    //Add blockWithoutNextBlockMetada, expect blockWithNextBlockMetadata back.
+    CacheTestUtils.getBlockAndAssertEquals(cache, key, blockWithoutNextBlockMetadata, actualBuffer,
+        block1Buffer);
+
+    //Clear and add blockWithoutNextBlockMetadata
+    cache.clearCache();
+    assertNull(cache.getBlock(key, false, false, false));
+    CacheTestUtils.getBlockAndAssertEquals(cache, key, blockWithoutNextBlockMetadata, actualBuffer,
+        block2Buffer);
+
+    //Add blockWithNextBlockMetadata, expect blockWithNextBlockMetadata to replace.
+    CacheTestUtils.getBlockAndAssertEquals(cache, key, blockWithNextBlockMetadata, actualBuffer,
+        block1Buffer);
+  }
+
   private CachedItem [] generateFixedBlocks(int numBlocks, int size, String pfx) {
     CachedItem [] blocks = new CachedItem[numBlocks];
     for(int i=0;i<numBlocks;i++) {
@@ -883,9 +941,9 @@ public class TestLruBlockCache {
     }
 
     @Override
-    public void serialize(ByteBuffer destination) {
+    public void serialize(ByteBuffer destination, boolean includeNextBlockMetadata) {
     }
-    
+
     @Override
     public BlockType getBlockType() {
       return BlockType.DATA;

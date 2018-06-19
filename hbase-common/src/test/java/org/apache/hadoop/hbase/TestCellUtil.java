@@ -15,12 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -34,11 +34,18 @@ import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Assert;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.mockito.Mockito;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestCellUtil {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestCellUtil.class);
+
   /**
    * CellScannable used in test. Returns a {@link TestCellScanner}
    */
@@ -194,11 +201,6 @@ public class TestCellUtil {
     public int getTagsLength() {
       // TODO Auto-generated method stub
       return 0;
-    }
-
-    @Override
-    public Type getType() {
-      return PrivateCellUtil.toType(getTypeByte());
     }
   }
 
@@ -382,7 +384,7 @@ public class TestCellUtil {
         HConstants.EMPTY_BYTE_ARRAY);
     cellToString = CellUtil.getCellKeyAsString(cell);
     assertEquals(kv.toString(), cellToString);
-    
+
   }
 
   @Test
@@ -522,6 +524,30 @@ public class TestCellUtil {
     assertTrue(CellUtil.equals(kv, res));
   }
 
+  @Test
+  public void testGetType() throws IOException {
+    Cell c = Mockito.mock(Cell.class);
+    Mockito.when(c.getType()).thenCallRealMethod();
+    for (Cell.Type type : Cell.Type.values()) {
+      Mockito.when(c.getTypeByte()).thenReturn(type.getCode());
+      assertEquals(type, c.getType());
+    }
+
+    try {
+      Mockito.when(c.getTypeByte()).thenReturn(KeyValue.Type.Maximum.getCode());
+      c.getType();
+      fail("The code of Maximum can't be handled by Cell.Type");
+    } catch(UnsupportedOperationException e) {
+    }
+
+    try {
+      Mockito.when(c.getTypeByte()).thenReturn(KeyValue.Type.Minimum.getCode());
+      c.getType();
+      fail("The code of Maximum can't be handled by Cell.Type");
+    } catch(UnsupportedOperationException e) {
+    }
+  }
+
   private static class NonExtendedCell implements Cell {
     private KeyValue kv;
 
@@ -617,11 +643,6 @@ public class TestCellUtil {
     @Override
     public int getTagsLength() {
       return this.kv.getTagsLength();
-    }
-
-    @Override
-    public Type getType() {
-      return PrivateCellUtil.toType(getTypeByte());
     }
   }
 }

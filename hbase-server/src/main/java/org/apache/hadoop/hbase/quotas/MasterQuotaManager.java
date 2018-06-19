@@ -25,14 +25,18 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.RegionStateListener;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.namespace.NamespaceAuditor;
@@ -41,11 +45,17 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.collect.HashMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
 import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetQuotaRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetQuotaResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.FileArchiveNotificationRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.FileArchiveNotificationRequest.FileWithSize;
 
 /**
  * Master Quota Manager.
@@ -455,7 +465,7 @@ public class MasterQuotaManager implements RegionStateListener {
   }
 
   private static class NamedLock<T> {
-    private HashSet<T> locks = new HashSet<>();
+    private final HashSet<T> locks = new HashSet<>();
 
     public void lock(final T name) throws InterruptedException {
       synchronized (locks) {
@@ -501,6 +511,7 @@ public class MasterQuotaManager implements RegionStateListener {
       return time;
     }
 
+    @Override
     public boolean equals(Object o) {
       if (o instanceof SizeSnapshotWithTimestamp) {
         SizeSnapshotWithTimestamp other = (SizeSnapshotWithTimestamp) o;
@@ -509,6 +520,7 @@ public class MasterQuotaManager implements RegionStateListener {
       return false;
     }
 
+    @Override
     public int hashCode() {
       HashCodeBuilder hcb = new HashCodeBuilder();
       return hcb.append(size).append(time).toHashCode();
@@ -563,6 +575,27 @@ public class MasterQuotaManager implements RegionStateListener {
       }
     }
     return numEntriesRemoved;
+  }
+
+  public void processFileArchivals(FileArchiveNotificationRequest request, Connection conn,
+      Configuration conf, FileSystem fs) throws IOException {
+    final HashMultimap<TableName,Entry<String,Long>> archivedFilesByTable = HashMultimap.create();
+    // Group the archived files by table
+    for (FileWithSize fileWithSize : request.getArchivedFilesList()) {
+      TableName tn = ProtobufUtil.toTableName(fileWithSize.getTableName());
+      archivedFilesByTable.put(
+          tn, Maps.immutableEntry(fileWithSize.getName(), fileWithSize.getSize()));
+    }
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("Grouped archived files by table: " + archivedFilesByTable);
+    }
+    // Report each set of files to the appropriate object
+    for (TableName tn : archivedFilesByTable.keySet()) {
+      final Set<Entry<String,Long>> filesWithSize = archivedFilesByTable.get(tn);
+      final FileArchiverNotifier notifier = FileArchiverNotifierFactoryImpl.getInstance().get(
+          conn, conf, fs, tn);
+      notifier.addArchivedFiles(filesWithSize);
+    }
   }
 }
 

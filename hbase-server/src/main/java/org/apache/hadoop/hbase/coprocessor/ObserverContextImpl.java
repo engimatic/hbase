@@ -48,6 +48,7 @@ public class ObserverContextImpl<E extends CoprocessorEnvironment> implements Ob
     this.bypassable = bypassable;
   }
 
+  @Override
   public E getEnvironment() {
     return env;
   }
@@ -58,8 +59,9 @@ public class ObserverContextImpl<E extends CoprocessorEnvironment> implements Ob
 
   public boolean isBypassable() {
     return this.bypassable;
-  };
+  }
 
+  @Override
   public void bypass() {
     if (!this.bypassable) {
       throw new UnsupportedOperationException("This method does not support 'bypass'.");
@@ -82,6 +84,7 @@ public class ObserverContextImpl<E extends CoprocessorEnvironment> implements Ob
     return false;
   }
 
+  @Override
   public Optional<User> getCaller() {
     return Optional.ofNullable(caller);
   }

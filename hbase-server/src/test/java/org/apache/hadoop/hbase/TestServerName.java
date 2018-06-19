@@ -22,17 +22,35 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.regex.Pattern;
-
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Addressing;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestServerName {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestServerName.class);
+
+  @Test
+  public void testHash() {
+    ServerName sn1 = ServerName.parseServerName("asf903.gq1.ygridcore.net,52690,1517835491385");
+    ServerName sn2 = ServerName.parseServerName("asf903.gq1.ygridcore.net,42231,1517835491329");
+    Set<ServerName> sns = new HashSet<ServerName>();
+    sns.add(sn2);
+    sns.add(sn1);
+    sns.add(sn1);
+    assertEquals(2, sns.size());
+  }
+
   @Test
   public void testGetHostNameMinusDomain() {
     assertEquals("2607:f0d0:1002:51::4",
@@ -69,16 +87,21 @@ public class TestServerName {
   }
 
   @Test public void testParseOfBytes() {
-    final String snStr = "www.example.org,1234,5678";
+    final String snStr = "www.EXAMPLE.org,1234,5678";
     ServerName sn = ServerName.valueOf(snStr);
     byte [] versionedBytes = sn.getVersionedBytes();
-    assertEquals(sn.toString(), ServerName.parseVersionedServerName(versionedBytes).toString());
-    final String hostnamePortStr = sn.getHostAndPort();
+    ServerName parsedSn = ServerName.parseVersionedServerName(versionedBytes);
+    assertEquals(sn.toString(), parsedSn.toString());
+    assertEquals(sn.getHostnameLowerCase(), parsedSn.getHostnameLowerCase());
+    assertEquals(sn.getPort(), parsedSn.getPort());
+    assertEquals(sn.getStartcode(), parsedSn.getStartcode());
+
+    final String hostnamePortStr = sn.getAddress().toString();
     byte [] bytes = Bytes.toBytes(hostnamePortStr);
-    String expecting =
-      hostnamePortStr.replace(":", ServerName.SERVERNAME_SEPARATOR) +
-      ServerName.SERVERNAME_SEPARATOR + ServerName.NON_STARTCODE;
-    assertEquals(expecting, ServerName.parseVersionedServerName(bytes).toString());
+    parsedSn = ServerName.parseVersionedServerName(bytes);
+    assertEquals(sn.getHostnameLowerCase(), parsedSn.getHostnameLowerCase());
+    assertEquals(sn.getPort(), parsedSn.getPort());
+    assertEquals(ServerName.NON_STARTCODE, parsedSn.getStartcode());
   }
 
   @Test
@@ -94,9 +117,8 @@ public class TestServerName {
       ServerName.valueOf("www.example.org", 1234, 5678).toString());
     assertEquals(sn.toString(),
       ServerName.valueOf("www.example.org:1234", 5678).toString());
-    assertEquals(sn.toString(),
-      "www.example.org" + ServerName.SERVERNAME_SEPARATOR + "1234" +
-      ServerName.SERVERNAME_SEPARATOR + "5678");
+    assertEquals("www.example.org" + ServerName.SERVERNAME_SEPARATOR + "1234"
+        + ServerName.SERVERNAME_SEPARATOR + "5678", sn.toString());
   }
 
   @Test

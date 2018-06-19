@@ -68,6 +68,7 @@ module Shell
   end
 
   #----------------------------------------------------------------------
+  # rubocop:disable Metrics/ClassLength
   class Shell
     attr_accessor :hbase
     attr_accessor :interactive
@@ -135,16 +136,8 @@ module Shell
     end
 
     # call the method 'command' on the specified command
-    # If interactive is enabled, then we suppress the return value. The command should have
-    # printed relevant output.
-    # Return value is only useful in non-interactive mode, for e.g. tests.
     def command(command, *args)
-      ret = internal_command(command, :command, *args)
-      if interactive
-        return nil
-      else
-        return ret
-      end
+      internal_command(command, :command, *args)
     end
 
     # call a specific internal method in the command instance
@@ -245,6 +238,7 @@ For more on the HBase Shell, see http://hbase.apache.org/book.html
       HERE
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end
 
 # Load commands base class
@@ -286,6 +280,7 @@ Shell.load_command_group(
     get_table
     locate_region
     list_regions
+    clone_table_schema
   ],
   aliases: {
     'describe' => ['desc']
@@ -336,6 +331,7 @@ Shell.load_command_group(
     normalize
     normalizer_switch
     normalizer_enabled
+    is_in_maintenance_mode
     close_region
     compact
     flush
@@ -361,6 +357,8 @@ Shell.load_command_group(
     list_deadservers
     clear_deadservers
     clear_block_cache
+    stop_master
+    stop_regionserver
   ],
   # TODO: remove older hlog_roll command
   aliases: {
@@ -378,6 +376,7 @@ Shell.load_command_group(
     enable_peer
     disable_peer
     set_peer_replicate_all
+    set_peer_serial
     set_peer_namespaces
     append_peer_namespaces
     remove_peer_namespaces

@@ -19,37 +19,58 @@ package org.apache.hadoop.hbase.regionserver;
 
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.yetus.audience.InterfaceAudience;
-
 /**
- * Reports the data size part and total heap space occupied by the MemStore.
- * Read-only.
+ * Data structure of three longs.
+ * Convenient package in which to carry current state of three counters.
+ * <p>Immutable!</p>
  * @see MemStoreSizing
  */
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.COPROC)
 public class MemStoreSize {
   /**
    *'dataSize' tracks the Cell's data bytes size alone (Key bytes, value bytes). A cell's data can
-   * be in on heap or off heap area depending on the MSLAB and its configuration to be using on heap
-   * or off heap LABs
+   * be in on heap or off heap area depending on the MSLAB and its configuration to be using on
+   * heap or off heap LABs
    */
-  protected long dataSize;
+  private final long dataSize;
 
-  /** 'heapSize' tracks all Cell's heap size occupancy. This will include Cell POJO heap overhead.
+  /**'getHeapSize' tracks all Cell's heap size occupancy. This will include Cell POJO heap overhead.
    * When Cells in on heap area, this will include the cells data size as well.
    */
-  protected long heapSize;
+  private final long heapSize;
 
-  public MemStoreSize() {
-    this(0L, 0L);
+  /** off-heap size: the aggregated size of all data that is allocated off-heap including all
+   * key-values that reside off-heap and the metadata that resides off-heap
+   */
+  private final long offHeapSize;
+
+  /**
+   * Package private constructor.
+   */
+  MemStoreSize() {
+    this(0L, 0L, 0L);
   }
 
-  public MemStoreSize(long dataSize, long heapSize) {
+  /**
+   * Package private constructor.
+   */
+  MemStoreSize(long dataSize, long heapSize, long offHeapSize) {
     this.dataSize = dataSize;
     this.heapSize = heapSize;
+    this.offHeapSize = offHeapSize;
+  }
+
+  /**
+   * Package private constructor.
+   */
+  MemStoreSize(MemStoreSize memStoreSize) {
+    this.dataSize = memStoreSize.getDataSize();
+    this.heapSize = memStoreSize.getHeapSize();
+    this.offHeapSize = memStoreSize.getOffHeapSize();
   }
 
   public boolean isEmpty() {
-    return this.dataSize == 0 && this.heapSize == 0;
+    return this.dataSize == 0 && this.heapSize == 0 && this.offHeapSize == 0;
   }
 
   public long getDataSize() {
@@ -60,24 +81,34 @@ public class MemStoreSize {
     return this.heapSize;
   }
 
+  public long getOffHeapSize() {
+    return this.offHeapSize;
+  }
+
   @Override
   public boolean equals(Object obj) {
-    if (obj == null || getClass() != obj.getClass()) {
+    if (obj == null) {
       return false;
     }
-    MemStoreSize other = (MemStoreSize) obj;
-    return this.dataSize == other.dataSize && this.heapSize == other.heapSize;
+    if (!(obj instanceof MemStoreSize)) {
+      return false;
+    }
+    MemStoreSize other = (MemStoreSize)obj;
+    return this.dataSize == other.dataSize && this.heapSize == other.heapSize &&
+        this.offHeapSize == other.offHeapSize;
   }
 
   @Override
   public int hashCode() {
-    long h = 13 * this.dataSize;
-    h = h + 14 * this.heapSize;
+    long h = 31 * this.dataSize;
+    h = h + 31 * this.heapSize;
+    h = h + 31 * this.offHeapSize;
     return (int) h;
   }
 
   @Override
   public String toString() {
-    return "dataSize=" + this.dataSize + " , heapSize=" + this.heapSize;
+    return "dataSize=" + this.dataSize + ", getHeapSize=" + this.heapSize +
+        ", getOffHeapSize=" + this.offHeapSize;
   }
 }

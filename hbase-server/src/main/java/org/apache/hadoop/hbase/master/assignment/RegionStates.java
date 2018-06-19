@@ -33,6 +33,7 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
@@ -59,6 +60,8 @@ public class RegionStates {
   private static final Logger LOG = LoggerFactory.getLogger(RegionStates.class);
 
   protected static final State[] STATES_EXPECTED_ON_OPEN = new State[] {
+    State.OPEN, // State may already be OPEN if we died after receiving the OPEN from regionserver
+                // but before complete finish of AssignProcedure. HBASE-20100.
     State.OFFLINE, State.CLOSED,      // disable/offline
     State.SPLITTING, State.SPLIT,     // ServerCrashProcedure
     State.OPENING, State.FAILED_OPEN, // already in-progress (retrying)
@@ -305,7 +308,43 @@ public class RegionStates {
     }
   }
 
-  public enum ServerState { ONLINE, SPLITTING, OFFLINE }
+  /**
+   * Server State.
+   */
+  public enum ServerState {
+    /**
+     * Initial state. Available.
+     */
+    ONLINE,
+
+    /**
+     * Only server which carries meta can have this state. We will split wal for meta and then
+     * assign meta first before splitting other wals.
+     */
+    SPLITTING_META,
+
+    /**
+     * Indicate that the meta splitting is done. We need this state so that the UnassignProcedure
+     * for meta can safely quit. See the comments in UnassignProcedure.remoteCallFailed for more
+     * details.
+     */
+    SPLITTING_META_DONE,
+
+    /**
+     * Server expired/crashed. Currently undergoing WAL splitting.
+     */
+    SPLITTING,
+
+    /**
+     * WAL splitting done. This state will be used to tell the UnassignProcedure that it can safely
+     * quit. See the comments in UnassignProcedure.remoteCallFailed for more details.
+     */
+    OFFLINE
+  }
+
+  /**
+   * State of Server; list of hosted regions, etc.
+   */
   public static class ServerStateNode implements Comparable<ServerStateNode> {
     private final ServerReportEvent reportEvent;
 
@@ -313,7 +352,6 @@ public class RegionStates {
     private final ServerName serverName;
 
     private volatile ServerState state = ServerState.ONLINE;
-    private volatile int versionNumber = 0;
 
     public ServerStateNode(final ServerName serverName) {
       this.serverName = serverName;
@@ -327,10 +365,6 @@ public class RegionStates {
 
     public ServerState getState() {
       return state;
-    }
-
-    public int getVersionNumber() {
-      return versionNumber;
     }
 
     public ProcedureEvent<?> getReportEvent() {
@@ -347,12 +381,8 @@ public class RegionStates {
       return expectedState;
     }
 
-    public void setState(final ServerState state) {
+    private void setState(final ServerState state) {
       this.state = state;
-    }
-
-    public void setVersionNumber(final int versionNumber) {
-      this.versionNumber = versionNumber;
     }
 
     public Set<RegionStateNode> getRegions() {
@@ -592,27 +622,48 @@ public class RegionStates {
   }
 
   // ============================================================================================
-  //  TODO: split helpers
+  // Split helpers
+  // These methods will only be called in ServerCrashProcedure, and at the end of SCP we will remove
+  // the ServerStateNode by calling removeServer.
   // ============================================================================================
-  public void logSplit(final ServerName serverName) {
-    final ServerStateNode serverNode = getOrCreateServer(serverName);
+
+  private void setServerState(ServerName serverName, ServerState state) {
+    ServerStateNode serverNode = getOrCreateServer(serverName);
     synchronized (serverNode) {
-      serverNode.setState(ServerState.SPLITTING);
-      /* THIS HAS TO BE WRONG. THIS IS SPLITTING OF REGION, NOT SPLITTING WALs.
-      for (RegionStateNode regionNode: serverNode.getRegions()) {
-        synchronized (regionNode) {
-          // TODO: Abort procedure if present
-          regionNode.setState(State.SPLITTING);
-        }
-      }*/
+      serverNode.setState(state);
     }
   }
 
-  public void logSplit(final RegionInfo regionInfo) {
-    final RegionStateNode regionNode = getRegionStateNode(regionInfo);
-    synchronized (regionNode) {
-      regionNode.setState(State.SPLIT);
-    }
+  /**
+   * Call this when we start meta log splitting a crashed Server.
+   * @see #metaLogSplit(ServerName)
+   */
+  public void metaLogSplitting(ServerName serverName) {
+    setServerState(serverName, ServerState.SPLITTING_META);
+  }
+
+  /**
+   * Called after we've split the meta logs on a crashed Server.
+   * @see #metaLogSplitting(ServerName)
+   */
+  public void metaLogSplit(ServerName serverName) {
+    setServerState(serverName, ServerState.SPLITTING_META_DONE);
+  }
+
+  /**
+   * Call this when we start log splitting for a crashed Server.
+   * @see #logSplit(ServerName)
+   */
+  public void logSplitting(final ServerName serverName) {
+    setServerState(serverName, ServerState.SPLITTING);
+  }
+
+  /**
+   * Called after we've split all logs on a crashed Server.
+   * @see #logSplitting(ServerName)
+   */
+  public void logSplit(final ServerName serverName) {
+    setServerState(serverName, ServerState.OFFLINE);
   }
 
   @VisibleForTesting
@@ -864,7 +915,7 @@ public class RegionStates {
     private final RegionStateNode regionNode;
 
     private volatile Exception exception = null;
-    private volatile int retries = 0;
+    private AtomicInteger retries = new AtomicInteger();
 
     public RegionFailedOpen(final RegionStateNode regionNode) {
       this.regionNode = regionNode;
@@ -879,11 +930,11 @@ public class RegionStates {
     }
 
     public int incrementAndGetRetries() {
-      return ++this.retries;
+      return this.retries.incrementAndGet();
     }
 
     public int getRetries() {
-      return retries;
+      return retries.get();
     }
 
     public void setException(final Exception exception) {
@@ -927,6 +978,12 @@ public class RegionStates {
   // ==========================================================================
   //  Servers
   // ==========================================================================
+
+  /**
+   * Be judicious calling this method. Do it on server register ONLY otherwise
+   * you could mess up online server accounting. TOOD: Review usage and convert
+   * to {@link #getServerNode(ServerName)} where we can.
+   */
   public ServerStateNode getOrCreateServer(final ServerName serverName) {
     ServerStateNode node = serverMap.get(serverName);
     if (node == null) {

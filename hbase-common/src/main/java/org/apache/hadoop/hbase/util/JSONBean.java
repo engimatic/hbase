@@ -16,6 +16,9 @@
  */
 package org.apache.hadoop.hbase.util;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerationException;
+import com.fasterxml.jackson.core.JsonGenerator;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -25,7 +28,6 @@ import java.lang.reflect.Array;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Set;
-
 import javax.management.AttributeNotFoundException;
 import javax.management.InstanceNotFoundException;
 import javax.management.IntrospectionException;
@@ -41,17 +43,14 @@ import javax.management.RuntimeMBeanException;
 import javax.management.openmbean.CompositeData;
 import javax.management.openmbean.CompositeType;
 import javax.management.openmbean.TabularData;
-
+import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonGenerationException;
-import com.fasterxml.jackson.core.JsonGenerator;
 
 /**
  * Utility for doing JSON and MBeans.
  */
+@InterfaceAudience.Private
 public class JSONBean {
   private static final Logger LOG = LoggerFactory.getLogger(JSONBean.class);
   private final JsonFactory jsonFactory;
@@ -311,7 +310,11 @@ public class JSONBean {
         jg.writeEndArray();
       } else if(value instanceof Number) {
         Number n = (Number)value;
-        jg.writeNumber(n.toString());
+        if (Double.isFinite(n.doubleValue())) {
+          jg.writeNumber(n.toString());
+        } else {
+          jg.writeString(n.toString());
+        }
       } else if(value instanceof Boolean) {
         Boolean b = (Boolean)value;
         jg.writeBoolean(b);

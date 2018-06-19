@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver;
 
 import java.io.FileNotFoundException;
@@ -25,9 +23,9 @@ import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -51,6 +49,7 @@ import org.apache.hadoop.hbase.util.FSHDFSUtils;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,7 +75,7 @@ public class HRegionFileSystem {
   public static final String REGION_SPLITS_DIR = ".splits";
 
   /** Temporary subdirectory of the region directory used for compaction output. */
-  private static final String REGION_TEMP_DIR = ".tmp";
+  @VisibleForTesting static final String REGION_TEMP_DIR = ".tmp";
 
   private final RegionInfo regionInfo;
   //regionInfo for interacting with FS (getting encodedName, etc)
@@ -84,6 +83,7 @@ public class HRegionFileSystem {
   private final Configuration conf;
   private final Path tableDir;
   private final FileSystem fs;
+  private final Path regionDir;
 
   /**
    * In order to handle NN connectivity hiccups, one need to retry non-idempotent operation at the
@@ -105,9 +105,10 @@ public class HRegionFileSystem {
       final RegionInfo regionInfo) {
     this.fs = fs;
     this.conf = conf;
-    this.tableDir = tableDir;
-    this.regionInfo = regionInfo;
+    this.tableDir = Objects.requireNonNull(tableDir, "tableDir is null");
+    this.regionInfo = Objects.requireNonNull(regionInfo, "regionInfo is null");
     this.regionInfoForFs = ServerRegionReplicaUtil.getRegionInfoForFs(regionInfo);
+    this.regionDir = FSUtils.getRegionDir(tableDir, regionInfo);
     this.hdfsClientRetriesNumber = conf.getInt("hdfs.client.retries.number",
       DEFAULT_HDFS_CLIENT_RETRIES_NUMBER);
     this.baseSleepBeforeRetries = conf.getInt("hdfs.client.sleep.before.retries",
@@ -135,7 +136,7 @@ public class HRegionFileSystem {
 
   /** @return {@link Path} to the region directory. */
   public Path getRegionDir() {
-    return new Path(this.tableDir, this.regionInfoForFs.getEncodedName());
+    return regionDir;
   }
 
   // ===========================================================================
@@ -460,7 +461,7 @@ public class HRegionFileSystem {
       throw new FileNotFoundException(buildPath.toString());
     }
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Committing store file " + buildPath + " as " + dstPath);
+      LOG.debug("Committing " + buildPath + " as " + dstPath);
     }
     return dstPath;
   }
@@ -652,7 +653,9 @@ public class HRegionFileSystem {
    * @param f File to split.
    * @param splitRow Split Row
    * @param top True if we are referring to the top half of the hfile.
-   * @param splitPolicy
+   * @param splitPolicy A split policy instance; be careful! May not be full populated; e.g. if
+   *                    this method is invoked on the Master side, then the RegionSplitPolicy will
+   *                    NOT have a reference to a Region.
    * @return Path to created reference.
    * @throws IOException
    */
@@ -967,22 +970,22 @@ public class HRegionFileSystem {
   public static HRegionFileSystem createRegionOnFileSystem(final Configuration conf,
       final FileSystem fs, final Path tableDir, final RegionInfo regionInfo) throws IOException {
     HRegionFileSystem regionFs = new HRegionFileSystem(conf, fs, tableDir, regionInfo);
-    Path regionDir = regionFs.getRegionDir();
 
-    if (fs.exists(regionDir)) {
-      LOG.warn("Trying to create a region that already exists on disk: " + regionDir);
-      throw new IOException("The specified region already exists on disk: " + regionDir);
-    }
-
-    // Create the region directory
-    if (!createDirOnFileSystem(fs, conf, regionDir)) {
-      LOG.warn("Unable to create the region directory: " + regionDir);
-      throw new IOException("Unable to create region directory: " + regionDir);
-    }
-
-    // Write HRI to a file in case we need to recover hbase:meta
-    // Only primary replicas should write region info
+    // We only create a .regioninfo and the region directory if this is the default region replica
     if (regionInfo.getReplicaId() == RegionInfo.DEFAULT_REPLICA_ID) {
+      Path regionDir = regionFs.getRegionDir();
+      if (fs.exists(regionDir)) {
+        LOG.warn("Trying to create a region that already exists on disk: " + regionDir);
+        throw new IOException("The specified region already exists on disk: " + regionDir);
+      }
+
+      // Create the region directory
+      if (!createDirOnFileSystem(fs, conf, regionDir)) {
+        LOG.warn("Unable to create the region directory: " + regionDir);
+        throw new IOException("Unable to create region directory: " + regionDir);
+      }
+
+      // Write HRI to a file in case we need to recover hbase:meta
       regionFs.writeRegionInfoOnFilesystem(false);
     } else {
       if (LOG.isDebugEnabled())

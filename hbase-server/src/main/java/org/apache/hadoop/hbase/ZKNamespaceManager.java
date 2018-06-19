@@ -55,7 +55,7 @@ public class ZKNamespaceManager extends ZKListener {
 
   public ZKNamespaceManager(ZKWatcher zkw) throws IOException {
     super(zkw);
-    nsZNode = zkw.znodePaths.namespaceZNode;
+    nsZNode = zkw.getZNodePaths().namespaceZNode;
     cache = new ConcurrentSkipListMap<>();
   }
 
@@ -74,6 +74,10 @@ public class ZKNamespaceManager extends ZKListener {
     } catch (KeeperException e) {
       throw new IOException("Failed to initialize ZKNamespaceManager", e);
     }
+  }
+
+  public void stop() throws IOException {
+    this.watcher.unregisterListener(this);
   }
 
   public NamespaceDescriptor get(String name) {

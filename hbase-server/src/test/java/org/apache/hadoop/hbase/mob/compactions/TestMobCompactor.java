@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -38,15 +37,14 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
 import javax.crypto.spec.SecretKeySpec;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -98,6 +96,7 @@ import org.apache.hadoop.hbase.util.Threads;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -107,6 +106,11 @@ import org.slf4j.LoggerFactory;
 
 @Category(LargeTests.class)
 public class TestMobCompactor {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestMobCompactor.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestMobCompactor.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static Configuration conf = null;
@@ -179,7 +183,6 @@ public class TestMobCompactor {
     TEST_UTIL.getConfiguration().setLong(TimeToLiveHFileCleaner.TTL_CONF_KEY, 0);
     TEST_UTIL.getConfiguration().setInt("hbase.client.retries.number", 1);
     TEST_UTIL.getConfiguration().setInt("hbase.hfile.compaction.discharger.interval", 100);
-    TEST_UTIL.getConfiguration().setBoolean("hbase.online.schema.update.enable", true);
     TEST_UTIL.startMiniCluster(1);
     pool = createThreadPool(TEST_UTIL.getConfiguration());
     conn = ConnectionFactory.createConnection(TEST_UTIL.getConfiguration(), pool);
@@ -274,7 +277,7 @@ public class TestMobCompactor {
     LOG.info("alter status finished");
   }
 
-  @Test(timeout = 300000)
+  @Test
   public void testMinorCompaction() throws Exception {
     resetConf();
     int mergeSize = 5000;
@@ -424,7 +427,7 @@ public class TestMobCompactor {
         new String[] { "20150907", "20151128", "20151205", "20160103" }, false);
   }
 
-  @Test(timeout = 300000)
+  @Test
   public void testCompactionWithHFileLink() throws IOException, InterruptedException {
     resetConf();
     String tableNameAsString = "testCompactionWithHFileLink";
@@ -513,7 +516,7 @@ public class TestMobCompactor {
     assertRefFileNameEqual(family1);
   }
 
-  @Test(timeout = 300000)
+  @Test
   public void testMajorCompactionFromAdmin() throws Exception {
     resetConf();
     int mergeSize = 5000;
@@ -588,7 +591,7 @@ public class TestMobCompactor {
     table.close();
   }
 
-  @Test(timeout = 300000)
+  @Test
   public void testScannerOnBulkLoadRefHFiles() throws Exception {
     resetConf();
     setUp("testScannerOnBulkLoadRefHFiles");
@@ -648,7 +651,7 @@ public class TestMobCompactor {
    * is compacted with some other normal hfiles. This is to make sure the mvcc is included
    * after compaction for mob enabled store files.
    */
-  @Test(timeout = 300000)
+  @Test
   public void testGetAfterCompaction() throws Exception {
     resetConf();
     conf.setLong(TimeToLiveHFileCleaner.TTL_CONF_KEY, 0);

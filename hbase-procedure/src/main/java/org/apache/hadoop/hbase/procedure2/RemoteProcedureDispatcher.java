@@ -94,8 +94,8 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
       return false;
     }
 
-    LOG.info("Starting procedure remote dispatcher; threads=" + this.corePoolSize +
-      ", queueMaxSize=" + this.queueMaxSize + ", operationDelay=" + this.operationDelay);
+    LOG.info("Instantiated, coreThreads={} (allowCoreThreadTimeOut=true), queueMaxSize={}, " +
+        "operationDelay={}", this.corePoolSize, this.queueMaxSize, this.operationDelay);
 
     // Create the timeout executor
     timeoutExecutor = new TimeoutExecutorThread();
@@ -162,24 +162,25 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
   }
 
   /**
-   * Add a remote rpc. Be sure to check result for successful add.
+   * Add a remote rpc.
    * @param key the node identifier
-   * @return True if we successfully added the operation.
    */
-  public boolean addOperationToNode(final TRemote key, RemoteProcedure rp) {
+  public void addOperationToNode(final TRemote key, RemoteProcedure rp)
+  throws NullTargetServerDispatchException, NoServerDispatchException, NoNodeDispatchException {
     if (key == null) {
-      // Key is remote server name. Be careful. It could have been nulled by a concurrent
-      // ServerCrashProcedure shutting down outstanding RPC requests. See remoteCallFailed.
-      return false;
+      throw new NullTargetServerDispatchException(rp.toString());
     }
-    assert key != null : "found null key for node";
     BufferNode node = nodeMap.get(key);
     if (node == null) {
-      return false;
+      // If null here, it means node has been removed because it crashed. This happens when server
+      // is expired in ServerManager. ServerCrashProcedure may or may not have run.
+      throw new NoServerDispatchException(key.toString() + "; " + rp.toString());
     }
     node.add(rp);
     // Check our node still in the map; could have been removed by #removeNode.
-    return nodeMap.containsValue(node);
+    if (!nodeMap.containsValue(node)) {
+      throw new NoNodeDispatchException(key.toString() + "; " + rp.toString());
+    }
   }
 
   /**
@@ -226,13 +227,29 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
 
   /**
    * Remote procedure reference.
-   * @param <TEnv>
-   * @param <TRemote>
    */
   public interface RemoteProcedure<TEnv, TRemote> {
+    /**
+     * For building the remote operation.
+     */
     RemoteOperation remoteCallBuild(TEnv env, TRemote remote);
-    void remoteCallCompleted(TEnv env, TRemote remote, RemoteOperation response);
+
+    /**
+     * Called when the executeProcedure call is failed.
+     */
     void remoteCallFailed(TEnv env, TRemote remote, IOException exception);
+
+    /**
+     * Called when RS tells the remote procedure is succeeded through the
+     * {@code reportProcedureDone} method.
+     */
+    void remoteOperationCompleted(TEnv env);
+
+    /**
+     * Called when RS tells the remote procedure is failed through the {@code reportProcedureDone}
+     * method.
+     */
+    void remoteOperationFailed(TEnv env, RemoteProcedureException error);
   }
 
   /**
@@ -331,10 +348,12 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
       super(key, 0);
     }
 
+    @Override
     public TRemote getKey() {
       return getObject();
     }
 
+    @Override
     public synchronized void add(final RemoteProcedure operation) {
       if (this.operations == null) {
         this.operations = new HashSet<>();
@@ -348,6 +367,7 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
       }
     }
 
+    @Override
     public synchronized void dispatch() {
       if (operations != null) {
         remoteDispatch(getKey(), operations);

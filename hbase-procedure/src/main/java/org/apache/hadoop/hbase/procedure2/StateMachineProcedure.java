@@ -28,6 +28,9 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.StateMachineProcedureData;
 
 /**
@@ -71,7 +74,8 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
    */
   private int previousState;
 
-  protected enum Flow {
+  @VisibleForTesting
+  public enum Flow {
     HAS_MORE_STATE,
     NO_MORE_STATE,
   }
@@ -138,10 +142,15 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
    * Add a child procedure to execute
    * @param subProcedure the child procedure
    */
-  protected void addChildProcedure(Procedure<TEnvironment>... subProcedure) {
-    if (subProcedure == null) return;
+  protected <T extends Procedure<TEnvironment>> void addChildProcedure(
+      @SuppressWarnings("unchecked") T... subProcedure) {
+    if (subProcedure == null) {
+      return;
+    }
     final int len = subProcedure.length;
-    if (len == 0) return;
+    if (len == 0) {
+      return;
+    }
     if (subProcList == null) {
       subProcList = new ArrayList<>(len);
     }
@@ -176,9 +185,7 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
         this.cycles++;
       }
 
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(toString());
-      }
+      LOG.trace("{}", toString());
       stateFlow = executeFromState(env, state);
       if (!hasMoreState()) setNextState(EOF_STATE);
       if (subProcList != null && !subProcList.isEmpty()) {
@@ -211,18 +218,12 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
 
   @Override
   protected boolean abort(final TEnvironment env) {
-    final boolean isDebugEnabled = LOG.isDebugEnabled();
-    final TState state = getCurrentState();
-    if (isDebugEnabled) {
-      LOG.debug("abort requested for " + this + " state=" + state);
-    }
-
+    LOG.debug("Abort requested for {}", this);
     if (hasMoreState()) {
       aborted.set(true);
       return true;
-    } else if (isDebugEnabled) {
-      LOG.debug("ignoring abort request on state=" + state + " for " + this);
     }
+    LOG.debug("Ignoring abort request on {}", this);
     return false;
   }
 
@@ -259,6 +260,16 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
 
   protected TState getCurrentState() {
     return stateCount > 0 ? getState(states[stateCount-1]) : getInitialState();
+  }
+
+  /**
+   * This method is used from test code as it cannot be assumed that state transition will happen
+   * sequentially. Some procedures may skip steps/ states, some may add intermediate steps in
+   * future.
+   */
+  @VisibleForTesting
+  public int getCurrentStateId() {
+    return getStateId(getCurrentState());
   }
 
   /**

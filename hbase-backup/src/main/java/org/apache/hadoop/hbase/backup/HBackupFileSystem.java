@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
  * the on-disk Backup Image data.
  */
 @InterfaceAudience.Private
-public class HBackupFileSystem {
+public final class HBackupFileSystem {
   public static final Logger LOG = LoggerFactory.getLogger(HBackupFileSystem.class);
 
   /**
@@ -61,6 +61,25 @@ public class HBackupFileSystem {
     return backupRootDir + Path.SEPARATOR + backupId + Path.SEPARATOR
         + tableName.getNamespaceAsString() + Path.SEPARATOR + tableName.getQualifierAsString()
         + Path.SEPARATOR;
+  }
+
+  /**
+   * Get backup temporary directory
+   * @param backupRootDir backup root
+   * @return backup tmp directory path
+   */
+  public static Path getBackupTmpDirPath(String backupRootDir) {
+    return new Path(backupRootDir, ".tmp");
+  }
+
+  /**
+   * Get backup tmp directory for backupId
+   * @param backupRoot backup root
+   * @param backupId backup id
+   * @return backup tmp directory path
+   */
+  public static Path getBackupTmpDirPathForBackupId(String backupRoot, String backupId) {
+    return new Path(getBackupTmpDirPath(backupRoot), backupId);
   }
 
   public static String getTableBackupDataDir(String backupRootDir, String backupId,
@@ -106,10 +125,8 @@ public class HBackupFileSystem {
   // Move manifest file to other place
   private static Path getManifestPath(Configuration conf, Path backupRootPath, String backupId)
       throws IOException {
-    Path manifestPath = null;
-
     FileSystem fs = backupRootPath.getFileSystem(conf);
-    manifestPath =
+    Path manifestPath =
         new Path(getBackupPath(backupRootPath.toString(), backupId) + Path.SEPARATOR
             + BackupManifest.MANIFEST_FILE_NAME);
     if (!fs.exists(manifestPath)) {

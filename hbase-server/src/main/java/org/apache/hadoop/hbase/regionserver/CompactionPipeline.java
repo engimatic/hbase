@@ -23,11 +23,12 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.ClassSize;
 
 /**
  * The compaction pipeline of a {@link CompactingMemStore}, is a FIFO queue of segments.
@@ -125,7 +126,7 @@ public class CompactionPipeline {
         return false;
       }
       suffix = versionedList.getStoreSegments();
-      LOG.debug("Swapping pipeline suffix; before={}, new segement={}",
+      LOG.debug("Swapping pipeline suffix; before={}, new segment={}",
           versionedList.getStoreSegments().size(), segment);
       swapSuffix(suffix, segment, closeSuffix);
       readOnlyCopy = new LinkedList<>(pipeline);
@@ -135,19 +136,30 @@ public class CompactionPipeline {
       // update the global memstore size counter
       long suffixDataSize = getSegmentsKeySize(suffix);
       long newDataSize = 0;
-      if(segment != null) newDataSize = segment.keySize();
+      if(segment != null) {
+        newDataSize = segment.getDataSize();
+      }
       long dataSizeDelta = suffixDataSize - newDataSize;
       long suffixHeapSize = getSegmentsHeapSize(suffix);
+      long suffixOffHeapSize = getSegmentsOffHeapSize(suffix);
       long newHeapSize = 0;
-      if(segment != null) newHeapSize = segment.heapSize();
+      long newOffHeapSize = 0;
+      if(segment != null) {
+        newHeapSize = segment.getHeapSize();
+        newOffHeapSize = segment.getOffHeapSize();
+      }
+      long offHeapSizeDelta = suffixOffHeapSize - newOffHeapSize;
       long heapSizeDelta = suffixHeapSize - newHeapSize;
-      region.addMemStoreSize(new MemStoreSizing(-dataSizeDelta, -heapSizeDelta));
-      LOG.debug("Suffix data size={}, new segment data size={}, suffix heap size={}," +
-              "new segment heap size={}",
-          suffixDataSize,
-          newDataSize,
-          suffixHeapSize,
-          newHeapSize);
+      region.addMemStoreSize(-dataSizeDelta, -heapSizeDelta, -offHeapSizeDelta);
+      LOG.debug("Suffix data size={}, new segment data size={}, "
+              + "suffix heap size={}," + "new segment heap size={}"
+              + "suffix off heap size={}," + "new segment off heap size={}"
+          , suffixDataSize
+          , newDataSize
+          , suffixHeapSize
+          , newHeapSize
+          , suffixOffHeapSize
+          , newOffHeapSize);
     }
     return true;
   }
@@ -155,7 +167,15 @@ public class CompactionPipeline {
   private static long getSegmentsHeapSize(List<? extends Segment> list) {
     long res = 0;
     for (Segment segment : list) {
-      res += segment.heapSize();
+      res += segment.getHeapSize();
+    }
+    return res;
+  }
+
+  private static long getSegmentsOffHeapSize(List<? extends Segment> list) {
+    long res = 0;
+    for (Segment segment : list) {
+      res += segment.getOffHeapSize();
     }
     return res;
   }
@@ -163,7 +183,7 @@ public class CompactionPipeline {
   private static long getSegmentsKeySize(List<? extends Segment> list) {
     long res = 0;
     for (Segment segment : list) {
-      res += segment.keySize();
+      res += segment.getDataSize();
     }
     return res;
   }
@@ -194,14 +214,17 @@ public class CompactionPipeline {
       int i = 0;
       for (ImmutableSegment s : pipeline) {
         if ( s.canBeFlattened() ) {
-          MemStoreSizing newMemstoreAccounting = new MemStoreSizing(); // the size to be updated
+          // size to be updated
+          MemStoreSizing newMemstoreAccounting = new NonThreadSafeMemStoreSizing();
           ImmutableSegment newS = SegmentFactory.instance().createImmutableSegmentByFlattening(
               (CSLMImmutableSegment)s,idxType,newMemstoreAccounting,action);
           replaceAtIndex(i,newS);
           if(region != null) {
-            // update the global memstore size counter
-            // upon flattening there is no change in the data size
-            region.addMemStoreSize(new MemStoreSize(0, newMemstoreAccounting.getHeapSize()));
+            // Update the global memstore size counter upon flattening there is no change in the
+            // data size
+            MemStoreSize mss = newMemstoreAccounting.getMemStoreSize();
+            Preconditions.checkArgument(mss.getDataSize() == 0, "Not zero!");
+            region.addMemStoreSize(mss.getDataSize(), mss.getHeapSize(), mss.getOffHeapSize());
           }
           LOG.debug("Compaction pipeline segment {} flattened", s);
           return true;
@@ -236,22 +259,18 @@ public class CompactionPipeline {
     return minSequenceId;
   }
 
-  public MemStoreSizing getTailSizing() {
+  public MemStoreSize getTailSize() {
     LinkedList<? extends Segment> localCopy = readOnlyCopy;
-    if (localCopy.isEmpty()) return new MemStoreSizing();
-    return new MemStoreSizing(localCopy.peekLast().keySize(), localCopy.peekLast().heapSize());
+    return localCopy.isEmpty()? new MemStoreSize(): localCopy.peekLast().getMemStoreSize();
   }
 
-  public MemStoreSizing getPipelineSizing() {
-    long keySize = 0;
-    long heapSize = 0;
+  public MemStoreSize getPipelineSize() {
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     LinkedList<? extends Segment> localCopy = readOnlyCopy;
-    if (localCopy.isEmpty()) return new MemStoreSizing();
     for (Segment segment : localCopy) {
-      keySize += segment.keySize();
-      heapSize += segment.heapSize();
+      memStoreSizing.incMemStoreSize(segment.getMemStoreSize());
     }
-    return new MemStoreSizing(keySize, heapSize);
+    return memStoreSizing.getMemStoreSize();
   }
 
   private void swapSuffix(List<? extends Segment> suffix, ImmutableSegment segment,

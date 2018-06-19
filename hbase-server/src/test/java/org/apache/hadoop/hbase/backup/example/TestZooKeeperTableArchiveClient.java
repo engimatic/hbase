@@ -26,12 +26,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.ChoreService;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Stoppable;
@@ -41,6 +41,7 @@ import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.master.cleaner.BaseHFileCleanerDelegate;
+import org.apache.hadoop.hbase.master.cleaner.CleanerChore;
 import org.apache.hadoop.hbase.master.cleaner.HFileCleaner;
 import org.apache.hadoop.hbase.regionserver.CompactedHFilesDischarger;
 import org.apache.hadoop.hbase.regionserver.HRegion;
@@ -58,6 +59,7 @@ import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
@@ -72,6 +74,10 @@ import org.slf4j.LoggerFactory;
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestZooKeeperTableArchiveClient {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestZooKeeperTableArchiveClient.class);
 
   private static final Logger LOG = LoggerFactory.getLogger(TestZooKeeperTableArchiveClient.class);
   private static final HBaseTestingUtility UTIL = HBaseTestingUtility.createLocalHTU();
@@ -135,7 +141,7 @@ public class TestZooKeeperTableArchiveClient {
   /**
    * Test turning on/off archiving
    */
-  @Test (timeout=300000)
+  @Test
   public void testArchivingEnableDisable() throws Exception {
     // 1. turn on hfile backups
     LOG.debug("----Starting archiving");
@@ -158,7 +164,7 @@ public class TestZooKeeperTableArchiveClient {
       archivingClient.getArchivingEnabled(TABLE_NAME));
   }
 
-  @Test (timeout=300000)
+  @Test
   public void testArchivingOnSingleTable() throws Exception {
     createArchiveDirectory();
     FileSystem fs = UTIL.getTestFileSystem();
@@ -170,6 +176,7 @@ public class TestZooKeeperTableArchiveClient {
     Configuration conf = UTIL.getConfiguration();
     // setup the delegate
     Stoppable stop = new StoppableImplementation();
+    CleanerChore.initChorePool(conf);
     HFileCleaner cleaner = setupAndCreateCleaner(conf, fs, archiveDir, stop);
     List<BaseHFileCleanerDelegate> cleaners = turnOnArchiving(STRING_TABLE_NAME, cleaner);
     final LongTermArchivingHFileCleaner delegate = (LongTermArchivingHFileCleaner) cleaners.get(0);
@@ -206,7 +213,7 @@ public class TestZooKeeperTableArchiveClient {
    * Test archiving/cleaning across multiple tables, where some are retained, and others aren't
    * @throws Exception on failure
    */
-  @Test (timeout=300000)
+  @Test
   public void testMultipleTables() throws Exception {
     createArchiveDirectory();
     String otherTable = "otherTable";
@@ -224,6 +231,7 @@ public class TestZooKeeperTableArchiveClient {
     // setup the delegate
     Stoppable stop = new StoppableImplementation();
     final ChoreService choreService = new ChoreService("TEST_SERVER_NAME");
+    CleanerChore.initChorePool(conf);
     HFileCleaner cleaner = setupAndCreateCleaner(conf, fs, archiveDir, stop);
     List<BaseHFileCleanerDelegate> cleaners = turnOnArchiving(STRING_TABLE_NAME, cleaner);
     final LongTermArchivingHFileCleaner delegate = (LongTermArchivingHFileCleaner) cleaners.get(0);

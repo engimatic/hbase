@@ -18,31 +18,43 @@
  */
 package org.apache.hadoop.hbase.replication;
 
-import java.util.Arrays;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
+
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.TreeMap;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
+import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.runners.Parameterized.Parameter;
-import org.junit.runners.Parameterized.Parameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,11 +65,6 @@ import org.slf4j.LoggerFactory;
  * All other tests should have their own classes and extend this one
  */
 public class TestReplicationBase {
-/*
-  {
-    ((Log4JLogger) ReplicationSource.LOG).getLogger().setLevel(Level.ALL);
-  }*/
-
   private static final Logger LOG = LoggerFactory.getLogger(TestReplicationBase.class);
 
   protected static Configuration conf1 = HBaseConfiguration.create();
@@ -80,24 +87,84 @@ public class TestReplicationBase {
   protected static final int NB_ROWS_IN_BIG_BATCH =
       NB_ROWS_IN_BATCH * 10;
   protected static final long SLEEP_TIME = 500;
-  protected static final int NB_RETRIES = 10;
+  protected static final int NB_RETRIES = 50;
 
   protected static final TableName tableName = TableName.valueOf("test");
   protected static final byte[] famName = Bytes.toBytes("f");
   protected static final byte[] row = Bytes.toBytes("row");
   protected static final byte[] noRepfamName = Bytes.toBytes("norep");
+  protected static final String PEER_ID2 = "2";
 
-  @Parameter
-  public static boolean seperateOldWALs;
-
-  @Parameters
-  public static List<Boolean> params() {
-    return Arrays.asList(false, true);
+  protected boolean isSerialPeer() {
+    return false;
   }
 
-  /**
-   * @throws java.lang.Exception
-   */
+  protected final void cleanUp() throws IOException, InterruptedException {
+    // Starting and stopping replication can make us miss new logs,
+    // rolling like this makes sure the most recent one gets added to the queue
+    for (JVMClusterUtil.RegionServerThread r : utility1.getHBaseCluster()
+        .getRegionServerThreads()) {
+      utility1.getAdmin().rollWALWriter(r.getRegionServer().getServerName());
+    }
+    int rowCount = utility1.countRows(tableName);
+    utility1.deleteTableData(tableName);
+    // truncating the table will send one Delete per row to the slave cluster
+    // in an async fashion, which is why we cannot just call deleteTableData on
+    // utility2 since late writes could make it to the slave in some way.
+    // Instead, we truncate the first table and wait for all the Deletes to
+    // make it to the slave.
+    Scan scan = new Scan();
+    int lastCount = 0;
+    for (int i = 0; i < NB_RETRIES; i++) {
+      if (i == NB_RETRIES - 1) {
+        fail("Waited too much time for truncate");
+      }
+      ResultScanner scanner = htable2.getScanner(scan);
+      Result[] res = scanner.next(rowCount);
+      scanner.close();
+      if (res.length != 0) {
+        if (res.length < lastCount) {
+          i--; // Don't increment timeout if we make progress
+        }
+        lastCount = res.length;
+        LOG.info("Still got " + res.length + " rows");
+        Thread.sleep(SLEEP_TIME);
+      } else {
+        break;
+      }
+    }
+  }
+
+  protected static void waitForReplication(int expectedRows, int retries)
+      throws IOException, InterruptedException {
+    Scan scan;
+    for (int i = 0; i < retries; i++) {
+      scan = new Scan();
+      if (i== retries -1) {
+        fail("Waited too much time for normal batch replication");
+      }
+      ResultScanner scanner = htable2.getScanner(scan);
+      Result[] res = scanner.next(expectedRows);
+      scanner.close();
+      if (res.length != expectedRows) {
+        LOG.info("Only got " + res.length + " rows");
+        Thread.sleep(SLEEP_TIME);
+      } else {
+        break;
+      }
+    }
+  }
+
+  protected static void loadData(String prefix, byte[] row) throws IOException {
+    List<Put> puts = new ArrayList<>(NB_ROWS_IN_BATCH);
+    for (int i = 0; i < NB_ROWS_IN_BATCH; i++) {
+      Put put = new Put(Bytes.toBytes(prefix + Integer.toString(i)));
+      put.addColumn(famName, row, row);
+      puts.add(put);
+    }
+    htable1.put(puts);
+  }
+
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     conf1.set(HConstants.ZOOKEEPER_ZNODE_PARENT, "/1");
@@ -118,9 +185,7 @@ public class TestReplicationBase {
     conf1.setInt("replication.source.maxretriesmultiplier", 10);
     conf1.setFloat("replication.source.ratio", 1.0f);
     conf1.setBoolean("replication.source.eof.autorecovery", true);
-
-    // Parameter config
-    conf1.setBoolean(AbstractFSWALProvider.SEPARATE_OLDLOGDIR, seperateOldWALs);
+    conf1.setLong("hbase.serial.replication.waiting.ms", 100);
 
     utility1 = new HBaseTestingUtility(conf1);
     utility1.startMiniZKCluster();
@@ -149,20 +214,14 @@ public class TestReplicationBase {
     // as a component in deciding maximum number of parallel batches to send to the peer cluster.
     utility2.startMiniCluster(4);
 
-    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
-    rpc.setClusterKey(utility2.getClusterKey());
     hbaseAdmin = ConnectionFactory.createConnection(conf1).getAdmin();
-    hbaseAdmin.addReplicationPeer("2", rpc);
 
-    HTableDescriptor table = new HTableDescriptor(tableName);
-    HColumnDescriptor fam = new HColumnDescriptor(famName);
-    fam.setMaxVersions(100);
-    fam.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
-    table.addFamily(fam);
-    fam = new HColumnDescriptor(noRepfamName);
-    table.addFamily(fam);
+    TableDescriptor table = TableDescriptorBuilder.newBuilder(tableName)
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(famName).setMaxVersions(100)
+            .setScope(HConstants.REPLICATION_SCOPE_GLOBAL).build())
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(noRepfamName)).build();
     scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-    for(HColumnDescriptor f : table.getColumnFamilies()) {
+    for (ColumnFamilyDescriptor f : table.getColumnFamilies()) {
       scopes.put(f.getName(), f.getScope());
     }
     Connection connection1 = ConnectionFactory.createConnection(conf1);
@@ -179,9 +238,80 @@ public class TestReplicationBase {
     htable2 = connection2.getTable(tableName);
   }
 
-  /**
-   * @throws java.lang.Exception
-   */
+  private boolean peerExist(String peerId) throws IOException {
+    return hbaseAdmin.listReplicationPeers().stream().anyMatch(p -> peerId.equals(p.getPeerId()));
+  }
+
+  @Before
+  public void setUpBase() throws Exception {
+    if (!peerExist(PEER_ID2)) {
+      ReplicationPeerConfig rpc = ReplicationPeerConfig.newBuilder()
+          .setClusterKey(utility2.getClusterKey()).setSerial(isSerialPeer()).build();
+      hbaseAdmin.addReplicationPeer(PEER_ID2, rpc);
+    }
+  }
+
+  @After
+  public void tearDownBase() throws Exception {
+    if (peerExist(PEER_ID2)) {
+      hbaseAdmin.removeReplicationPeer(PEER_ID2);
+    }
+  }
+
+  protected static void runSimplePutDeleteTest() throws IOException, InterruptedException {
+    Put put = new Put(row);
+    put.addColumn(famName, row, row);
+
+    htable1 = utility1.getConnection().getTable(tableName);
+    htable1.put(put);
+
+    Get get = new Get(row);
+    for (int i = 0; i < NB_RETRIES; i++) {
+      if (i == NB_RETRIES - 1) {
+        fail("Waited too much time for put replication");
+      }
+      Result res = htable2.get(get);
+      if (res.isEmpty()) {
+        LOG.info("Row not available");
+        Thread.sleep(SLEEP_TIME);
+      } else {
+        assertArrayEquals(row, res.value());
+        break;
+      }
+    }
+
+    Delete del = new Delete(row);
+    htable1.delete(del);
+
+    get = new Get(row);
+    for (int i = 0; i < NB_RETRIES; i++) {
+      if (i == NB_RETRIES - 1) {
+        fail("Waited too much time for del replication");
+      }
+      Result res = htable2.get(get);
+      if (res.size() >= 1) {
+        LOG.info("Row not deleted");
+        Thread.sleep(SLEEP_TIME);
+      } else {
+        break;
+      }
+    }
+  }
+
+  protected static void runSmallBatchTest() throws IOException, InterruptedException {
+    // normal Batch tests
+    loadData("", row);
+
+    Scan scan = new Scan();
+
+    ResultScanner scanner1 = htable1.getScanner(scan);
+    Result[] res1 = scanner1.next(NB_ROWS_IN_BATCH);
+    scanner1.close();
+    assertEquals(NB_ROWS_IN_BATCH, res1.length);
+
+    waitForReplication(NB_ROWS_IN_BATCH, NB_RETRIES);
+  }
+
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
     htable2.close();

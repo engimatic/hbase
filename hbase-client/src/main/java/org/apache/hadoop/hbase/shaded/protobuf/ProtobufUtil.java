@@ -17,15 +17,18 @@
  */
 package org.apache.hadoop.hbase.shaded.protobuf;
 
+import static org.apache.hadoop.hbase.protobuf.ProtobufMagic.PB_MAGIC;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -85,7 +88,6 @@ import org.apache.hadoop.hbase.client.security.SecurityCapability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
 import org.apache.hadoop.hbase.filter.Filter;
-import org.apache.hadoop.hbase.io.LimitInputStream;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
 import org.apache.hadoop.hbase.protobuf.ProtobufMessageConverter;
@@ -106,6 +108,8 @@ import org.apache.hadoop.hbase.util.VersionInfo;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.yetus.audience.InterfaceAudience;
 
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.io.ByteStreams;
 import org.apache.hbase.thirdparty.com.google.gson.JsonArray;
 import org.apache.hbase.thirdparty.com.google.gson.JsonElement;
 import org.apache.hbase.thirdparty.com.google.protobuf.ByteString;
@@ -191,17 +195,10 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
  * @see ProtobufUtil
  */
 // TODO: Generate the non-shaded protobufutil from this one.
-@edu.umd.cs.findbugs.annotations.SuppressWarnings(
-  value="DP_CREATE_CLASSLOADER_INSIDE_DO_PRIVILEGED", justification="None. Address sometime.")
 @InterfaceAudience.Private // TODO: some clients (Hive, etc) use this class
 public final class ProtobufUtil {
   private ProtobufUtil() {
   }
-
-  /**
-   * Primitive type to class mapping.
-   */
-  private final static Map<String, Class<?>> PRIMITIVES = new HashMap<>();
 
   /**
    * Many results are simple: no cell, exists true or false. To save on object creations,
@@ -249,25 +246,27 @@ public final class ProtobufUtil {
     EMPTY_RESULT_PB_STALE = builder.build();
   }
 
+  private static volatile boolean classLoaderLoaded = false;
+
   /**
    * Dynamic class loader to load filter/comparators
    */
-  private final static ClassLoader CLASS_LOADER;
+  private final static class ClassLoaderHolder {
+    private final static ClassLoader CLASS_LOADER;
 
-  static {
-    ClassLoader parent = ProtobufUtil.class.getClassLoader();
-    Configuration conf = HBaseConfiguration.create();
-    CLASS_LOADER = new DynamicClassLoader(conf, parent);
+    static {
+      ClassLoader parent = ProtobufUtil.class.getClassLoader();
+      Configuration conf = HBaseConfiguration.create();
+      CLASS_LOADER = AccessController.doPrivileged((PrivilegedAction<ClassLoader>)
+        () -> new DynamicClassLoader(conf, parent)
+      );
+      classLoaderLoaded = true;
+    }
+  }
 
-    PRIMITIVES.put(Boolean.TYPE.getName(), Boolean.TYPE);
-    PRIMITIVES.put(Byte.TYPE.getName(), Byte.TYPE);
-    PRIMITIVES.put(Character.TYPE.getName(), Character.TYPE);
-    PRIMITIVES.put(Short.TYPE.getName(), Short.TYPE);
-    PRIMITIVES.put(Integer.TYPE.getName(), Integer.TYPE);
-    PRIMITIVES.put(Long.TYPE.getName(), Long.TYPE);
-    PRIMITIVES.put(Float.TYPE.getName(), Float.TYPE);
-    PRIMITIVES.put(Double.TYPE.getName(), Double.TYPE);
-    PRIMITIVES.put(Void.TYPE.getName(), Void.TYPE);
+  @VisibleForTesting
+  public static boolean isClassLoaderLoaded() {
+    return classLoaderLoaded;
   }
 
   /**
@@ -279,7 +278,7 @@ public final class ProtobufUtil {
    * byte array that is <code>bytes.length</code> plus {@link ProtobufMagic#PB_MAGIC}.length.
    */
   public static byte [] prependPBMagic(final byte [] bytes) {
-    return Bytes.add(ProtobufMagic.PB_MAGIC, bytes);
+    return Bytes.add(PB_MAGIC, bytes);
   }
 
   /**
@@ -304,10 +303,11 @@ public final class ProtobufUtil {
    * @param bytes bytes to check
    * @throws DeserializationException if we are missing the pb magic prefix
    */
-  public static void expectPBMagicPrefix(final byte [] bytes) throws DeserializationException {
+  public static void expectPBMagicPrefix(final byte[] bytes) throws DeserializationException {
     if (!isPBMagicPrefix(bytes)) {
-      throw new DeserializationException("Missing pb magic " +
-          Bytes.toString(ProtobufMagic.PB_MAGIC) + " prefix");
+      String bytesPrefix = bytes == null ? "null" : Bytes.toStringBinary(bytes, 0, PB_MAGIC.length);
+      throw new DeserializationException(
+          "Missing pb magic " + Bytes.toString(PB_MAGIC) + " prefix" + ", bytes: " + bytesPrefix);
     }
   }
 
@@ -531,13 +531,13 @@ public final class ProtobufUtil {
     }
     if (proto.getCfTimeRangeCount() > 0) {
       for (HBaseProtos.ColumnFamilyTimeRange cftr : proto.getCfTimeRangeList()) {
-        TimeRange timeRange = protoToTimeRange(cftr.getTimeRange());
+        TimeRange timeRange = toTimeRange(cftr.getTimeRange());
         get.setColumnFamilyTimeRange(cftr.getColumnFamily().toByteArray(),
             timeRange.getMin(), timeRange.getMax());
       }
     }
     if (proto.hasTimeRange()) {
-      TimeRange timeRange = protoToTimeRange(proto.getTimeRange());
+      TimeRange timeRange = toTimeRange(proto.getTimeRange());
       get.setTimeRange(timeRange.getMin(), timeRange.getMax());
     }
     if (proto.hasFilter()) {
@@ -860,7 +860,7 @@ public final class ProtobufUtil {
     Append append = toDelta((Bytes row) -> new Append(row.get(), row.getOffset(), row.getLength()),
             Append::add, proto, cellScanner);
     if (proto.hasTimeRange()) {
-      TimeRange timeRange = protoToTimeRange(proto.getTimeRange());
+      TimeRange timeRange = toTimeRange(proto.getTimeRange());
       append.setTimeRange(timeRange.getMin(), timeRange.getMax());
     }
     return append;
@@ -880,7 +880,7 @@ public final class ProtobufUtil {
     Increment increment = toDelta((Bytes row) -> new Increment(row.get(), row.getOffset(), row.getLength()),
             Increment::add, proto, cellScanner);
     if (proto.hasTimeRange()) {
-      TimeRange timeRange = protoToTimeRange(proto.getTimeRange());
+      TimeRange timeRange = toTimeRange(proto.getTimeRange());
       increment.setTimeRange(timeRange.getMin(), timeRange.getMax());
     }
     return increment;
@@ -952,7 +952,7 @@ public final class ProtobufUtil {
       }
     }
     if (proto.hasTimeRange()) {
-      TimeRange timeRange = protoToTimeRange(proto.getTimeRange());
+      TimeRange timeRange = toTimeRange(proto.getTimeRange());
       get.setTimeRange(timeRange.getMin(), timeRange.getMax());
     }
     for (NameBytesPair attribute : proto.getAttributeList()) {
@@ -1016,20 +1016,13 @@ public final class ProtobufUtil {
       scanBuilder.setLoadColumnFamiliesOnDemand(loadColumnFamiliesOnDemand);
     }
     scanBuilder.setMaxVersions(scan.getMaxVersions());
-    for (Entry<byte[], TimeRange> cftr : scan.getColumnFamilyTimeRange().entrySet()) {
-      HBaseProtos.ColumnFamilyTimeRange.Builder b = HBaseProtos.ColumnFamilyTimeRange.newBuilder();
-      b.setColumnFamily(UnsafeByteOperations.unsafeWrap(cftr.getKey()));
-      b.setTimeRange(timeRangeToProto(cftr.getValue()));
-      scanBuilder.addCfTimeRange(b);
-    }
-    TimeRange timeRange = scan.getTimeRange();
-    if (!timeRange.isAllTime()) {
-      HBaseProtos.TimeRange.Builder timeRangeBuilder =
-        HBaseProtos.TimeRange.newBuilder();
-      timeRangeBuilder.setFrom(timeRange.getMin());
-      timeRangeBuilder.setTo(timeRange.getMax());
-      scanBuilder.setTimeRange(timeRangeBuilder.build());
-    }
+    scan.getColumnFamilyTimeRange().forEach((cf, timeRange) -> {
+      scanBuilder.addCfTimeRange(HBaseProtos.ColumnFamilyTimeRange.newBuilder()
+        .setColumnFamily(UnsafeByteOperations.unsafeWrap(cf))
+        .setTimeRange(toTimeRange(timeRange))
+        .build());
+    });
+    scanBuilder.setTimeRange(ProtobufUtil.toTimeRange(scan.getTimeRange()));
     Map<String, byte[]> attributes = scan.getAttributesMap();
     if (!attributes.isEmpty()) {
       NameBytesPair.Builder attributeBuilder = NameBytesPair.newBuilder();
@@ -1148,13 +1141,13 @@ public final class ProtobufUtil {
     }
     if (proto.getCfTimeRangeCount() > 0) {
       for (HBaseProtos.ColumnFamilyTimeRange cftr : proto.getCfTimeRangeList()) {
-        TimeRange timeRange = protoToTimeRange(cftr.getTimeRange());
+        TimeRange timeRange = toTimeRange(cftr.getTimeRange());
         scan.setColumnFamilyTimeRange(cftr.getColumnFamily().toByteArray(),
             timeRange.getMin(), timeRange.getMax());
       }
     }
     if (proto.hasTimeRange()) {
-      TimeRange timeRange = protoToTimeRange(proto.getTimeRange());
+      TimeRange timeRange = toTimeRange(proto.getTimeRange());
       scan.setTimeRange(timeRange.getMin(), timeRange.getMax());
     }
     if (proto.hasFilter()) {
@@ -1244,20 +1237,13 @@ public final class ProtobufUtil {
     if (get.getFilter() != null) {
       builder.setFilter(ProtobufUtil.toFilter(get.getFilter()));
     }
-    for (Entry<byte[], TimeRange> cftr : get.getColumnFamilyTimeRange().entrySet()) {
-      HBaseProtos.ColumnFamilyTimeRange.Builder b = HBaseProtos.ColumnFamilyTimeRange.newBuilder();
-      b.setColumnFamily(UnsafeByteOperations.unsafeWrap(cftr.getKey()));
-      b.setTimeRange(timeRangeToProto(cftr.getValue()));
-      builder.addCfTimeRange(b);
-    }
-    TimeRange timeRange = get.getTimeRange();
-    if (!timeRange.isAllTime()) {
-      HBaseProtos.TimeRange.Builder timeRangeBuilder =
-        HBaseProtos.TimeRange.newBuilder();
-      timeRangeBuilder.setFrom(timeRange.getMin());
-      timeRangeBuilder.setTo(timeRange.getMax());
-      builder.setTimeRange(timeRangeBuilder.build());
-    }
+    get.getColumnFamilyTimeRange().forEach((cf, timeRange) -> {
+      builder.addCfTimeRange(HBaseProtos.ColumnFamilyTimeRange.newBuilder()
+        .setColumnFamily(UnsafeByteOperations.unsafeWrap(cf))
+        .setTimeRange(toTimeRange(timeRange))
+        .build());
+    });
+    builder.setTimeRange(ProtobufUtil.toTimeRange(get.getTimeRange()));
     Map<String, byte[]> attributes = get.getAttributesMap();
     if (!attributes.isEmpty()) {
       NameBytesPair.Builder attributeBuilder = NameBytesPair.newBuilder();
@@ -1302,16 +1288,6 @@ public final class ProtobufUtil {
     return builder.build();
   }
 
-  static void setTimeRange(final MutationProto.Builder builder, final TimeRange timeRange) {
-    if (!timeRange.isAllTime()) {
-      HBaseProtos.TimeRange.Builder timeRangeBuilder =
-        HBaseProtos.TimeRange.newBuilder();
-      timeRangeBuilder.setFrom(timeRange.getMin());
-      timeRangeBuilder.setTo(timeRange.getMax());
-      builder.setTimeRange(timeRangeBuilder.build());
-    }
-  }
-
   public static MutationProto toMutation(final MutationType type, final Mutation mutation)
     throws IOException {
     return toMutation(type, mutation, HConstants.NO_NONCE);
@@ -1343,12 +1319,10 @@ public final class ProtobufUtil {
       builder.setNonce(nonce);
     }
     if (type == MutationType.INCREMENT) {
-      TimeRange timeRange = ((Increment) mutation).getTimeRange();
-      setTimeRange(builder, timeRange);
+      builder.setTimeRange(ProtobufUtil.toTimeRange(((Increment) mutation).getTimeRange()));
     }
     if (type == MutationType.APPEND) {
-      TimeRange timeRange = ((Append) mutation).getTimeRange();
-      setTimeRange(builder, timeRange);
+      builder.setTimeRange(ProtobufUtil.toTimeRange(((Append) mutation).getTimeRange()));
     }
     ColumnValue.Builder columnBuilder = ColumnValue.newBuilder();
     QualifierValue.Builder valueBuilder = QualifierValue.newBuilder();
@@ -1406,10 +1380,10 @@ public final class ProtobufUtil {
     getMutationBuilderAndSetCommonFields(type, mutation, builder);
     builder.setAssociatedCellCount(mutation.size());
     if (mutation instanceof Increment) {
-      setTimeRange(builder, ((Increment)mutation).getTimeRange());
+      builder.setTimeRange(ProtobufUtil.toTimeRange(((Increment) mutation).getTimeRange()));
     }
     if (mutation instanceof Append) {
-      setTimeRange(builder, ((Append)mutation).getTimeRange());
+      builder.setTimeRange(ProtobufUtil.toTimeRange(((Append) mutation).getTimeRange()));
     }
     if (nonce != HConstants.NO_NONCE) {
       builder.setNonce(nonce);
@@ -1429,7 +1403,7 @@ public final class ProtobufUtil {
     builder.setRow(UnsafeByteOperations.unsafeWrap(mutation.getRow()));
     builder.setMutateType(type);
     builder.setDurability(toDurability(mutation.getDurability()));
-    builder.setTimestamp(mutation.getTimeStamp());
+    builder.setTimestamp(mutation.getTimestamp());
     Map<String, byte[]> attributes = mutation.getAttributesMap();
     if (!attributes.isEmpty()) {
       NameBytesPair.Builder attributeBuilder = NameBytesPair.newBuilder();
@@ -1601,8 +1575,7 @@ public final class ProtobufUtil {
     String funcName = "parseFrom";
     byte [] value = proto.getSerializedComparator().toByteArray();
     try {
-      Class<? extends ByteArrayComparable> c =
-        (Class<? extends ByteArrayComparable>)Class.forName(type, true, CLASS_LOADER);
+      Class<?> c = Class.forName(type, true, ClassLoaderHolder.CLASS_LOADER);
       Method parseFrom = c.getMethod(funcName, byte[].class);
       if (parseFrom == null) {
         throw new IOException("Unable to locate function: " + funcName + " in type: " + type);
@@ -1625,8 +1598,7 @@ public final class ProtobufUtil {
     final byte [] value = proto.getSerializedFilter().toByteArray();
     String funcName = "parseFrom";
     try {
-      Class<? extends Filter> c =
-        (Class<? extends Filter>)Class.forName(type, true, CLASS_LOADER);
+      Class<?> c = Class.forName(type, true, ClassLoaderHolder.CLASS_LOADER);
       Method parseFrom = c.getMethod(funcName, byte[].class);
       if (parseFrom == null) {
         throw new IOException("Unable to locate function: " + funcName + " in type: " + type);
@@ -1712,7 +1684,7 @@ public final class ProtobufUtil {
     String type = parameter.getName();
     try {
       Class<? extends Throwable> c =
-        (Class<? extends Throwable>)Class.forName(type, true, CLASS_LOADER);
+        (Class<? extends Throwable>)Class.forName(type, true, ClassLoaderHolder.CLASS_LOADER);
       Constructor<? extends Throwable> cn = null;
       try {
         cn = c.getDeclaredConstructor(String.class);
@@ -1945,7 +1917,7 @@ public final class ProtobufUtil {
   public static byte [] toDelimitedByteArray(final Message m) throws IOException {
     // Allocate arbitrary big size so we avoid resizing.
     ByteArrayOutputStream baos = new ByteArrayOutputStream(4096);
-    baos.write(ProtobufMagic.PB_MAGIC);
+    baos.write(PB_MAGIC);
     m.writeDelimitedTo(baos);
     return baos.toByteArray();
   }
@@ -2609,7 +2581,7 @@ public final class ProtobufUtil {
     final int firstByte = in.read();
     if (firstByte != -1) {
       final int size = CodedInputStream.readRawVarint32(firstByte, in);
-      final InputStream limitedInput = new LimitInputStream(in, size);
+      final InputStream limitedInput = ByteStreams.limit(in, size);
       final CodedInputStream codedInput = CodedInputStream.newInstance(limitedInput);
       codedInput.setSizeLimit(size);
       builder.mergeFrom(codedInput);
@@ -2758,24 +2730,11 @@ public final class ProtobufUtil {
     return scList;
   }
 
-  private static HBaseProtos.TimeRange.Builder timeRangeToProto(TimeRange timeRange) {
-    HBaseProtos.TimeRange.Builder timeRangeBuilder =
-        HBaseProtos.TimeRange.newBuilder();
-    timeRangeBuilder.setFrom(timeRange.getMin());
-    timeRangeBuilder.setTo(timeRange.getMax());
-    return timeRangeBuilder;
-  }
-
-  private static TimeRange protoToTimeRange(HBaseProtos.TimeRange timeRange) throws IOException {
-      long minStamp = 0;
-      long maxStamp = Long.MAX_VALUE;
-      if (timeRange.hasFrom()) {
-        minStamp = timeRange.getFrom();
-      }
-      if (timeRange.hasTo()) {
-        maxStamp = timeRange.getTo();
-      }
-    return new TimeRange(minStamp, maxStamp);
+  public static TimeRange toTimeRange(HBaseProtos.TimeRange timeRange) {
+    return timeRange == null ?
+      TimeRange.allTime() :
+      new TimeRange(timeRange.hasFrom() ? timeRange.getFrom() : 0,
+        timeRange.hasTo() ? timeRange.getTo() : Long.MAX_VALUE);
   }
 
   /**
@@ -2848,7 +2807,7 @@ public final class ProtobufUtil {
     ts.getColumnFamiliesList()
       .stream()
       .map(ProtobufUtil::toColumnFamilyDescriptor)
-      .forEach(builder::addColumnFamily);
+      .forEach(builder::setColumnFamily);
     ts.getAttributesList()
       .forEach(a -> builder.setValue(a.getFirst().toByteArray(), a.getSecond().toByteArray()));
     ts.getConfigurationList()
@@ -3218,7 +3177,7 @@ public final class ProtobufUtil {
         .setPeerID(rls.getPeerID())
         .setAgeOfLastShippedOp(rls.getAgeOfLastShippedOp())
         .setSizeOfLogQueue((int) rls.getSizeOfLogQueue())
-        .setTimeStampOfLastShippedOp(rls.getTimeStampOfLastShippedOp())
+        .setTimeStampOfLastShippedOp(rls.getTimestampOfLastShippedOp())
         .setReplicationLag(rls.getReplicationLag())
         .build();
   }
@@ -3227,7 +3186,16 @@ public final class ProtobufUtil {
       ReplicationLoadSink rls) {
     return ClusterStatusProtos.ReplicationLoadSink.newBuilder()
         .setAgeOfLastAppliedOp(rls.getAgeOfLastAppliedOp())
-        .setTimeStampsOfLastAppliedOp(rls.getTimeStampsOfLastAppliedOp())
+        .setTimeStampsOfLastAppliedOp(rls.getTimestampsOfLastAppliedOp())
         .build();
+  }
+
+  public static HBaseProtos.TimeRange toTimeRange(TimeRange timeRange) {
+    if (timeRange == null) {
+      timeRange = TimeRange.allTime();
+    }
+    return HBaseProtos.TimeRange.newBuilder().setFrom(timeRange.getMin())
+      .setTo(timeRange.getMax())
+      .build();
   }
 }

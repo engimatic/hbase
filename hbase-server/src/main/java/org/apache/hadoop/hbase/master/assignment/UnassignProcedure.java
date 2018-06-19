@@ -26,6 +26,7 @@ import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
+import org.apache.hadoop.hbase.favored.FavoredNodesManager;
 import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.master.RegionState.State;
 import org.apache.hadoop.hbase.master.assignment.RegionStates.RegionStateNode;
@@ -40,6 +41,7 @@ import org.apache.hadoop.hbase.regionserver.RegionServerStoppedException;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionTransitionState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.UnassignRegionStateData;
@@ -86,22 +88,34 @@ public class UnassignProcedure extends RegionTransitionProcedure {
   //       ...and keep unassign for 'disable' case?
   private boolean force;
 
+  /**
+   * Whether deleting the region from in-memory states after unassigning the region.
+   */
+  private boolean removeAfterUnassigning;
+
   public UnassignProcedure() {
     // Required by the Procedure framework to create the procedure on replay
     super();
   }
 
-  public UnassignProcedure(final RegionInfo regionInfo,  final ServerName hostingServer,
-                           final boolean force) {
-    this(regionInfo, hostingServer, null, force);
+  public UnassignProcedure(final RegionInfo regionInfo, final ServerName hostingServer,
+      final boolean force, final boolean removeAfterUnassigning) {
+    this(regionInfo, hostingServer, null, force, removeAfterUnassigning);
   }
 
   public UnassignProcedure(final RegionInfo regionInfo,
       final ServerName hostingServer, final ServerName destinationServer, final boolean force) {
+    this(regionInfo, hostingServer, destinationServer, force, false);
+  }
+
+  public UnassignProcedure(final RegionInfo regionInfo, final ServerName hostingServer,
+      final ServerName destinationServer, final boolean force,
+      final boolean removeAfterUnassigning) {
     super(regionInfo);
     this.hostingServer = hostingServer;
     this.destinationServer = destinationServer;
     this.force = force;
+    this.removeAfterUnassigning = removeAfterUnassigning;
 
     // we don't need REGION_TRANSITION_QUEUE, we jump directly to sending the request
     setTransitionState(RegionTransitionState.REGION_TRANSITION_DISPATCH);
@@ -136,6 +150,12 @@ public class UnassignProcedure extends RegionTransitionProcedure {
     if (force) {
       state.setForce(true);
     }
+    if (removeAfterUnassigning) {
+      state.setRemoveAfterUnassigning(true);
+    }
+    if (getAttempt() > 0) {
+      state.setAttempt(getAttempt());
+    }
     serializer.serialize(state.build());
   }
 
@@ -150,6 +170,10 @@ public class UnassignProcedure extends RegionTransitionProcedure {
     force = state.getForce();
     if (state.hasDestinationServer()) {
       this.destinationServer = ProtobufUtil.toServerName(state.getDestinationServer());
+    }
+    removeAfterUnassigning = state.getRemoveAfterUnassigning();
+    if (state.hasAttempt()) {
+      setAttempt(state.getAttempt());
     }
   }
 
@@ -175,10 +199,11 @@ public class UnassignProcedure extends RegionTransitionProcedure {
       return false;
     }
 
+
     // Mark the region as CLOSING.
     env.getAssignmentManager().markRegionAsClosing(regionNode);
 
-    // Add the close region operation the the server dispatch queue.
+    // Add the close region operation to the server dispatch queue.
     if (!addToRemoteDispatcher(env, regionNode.getRegionLocation())) {
       // If addToRemoteDispatcher fails, it calls the callback #remoteCallFailed.
     }
@@ -190,7 +215,20 @@ public class UnassignProcedure extends RegionTransitionProcedure {
   @Override
   protected void finishTransition(final MasterProcedureEnv env, final RegionStateNode regionNode)
       throws IOException {
-    env.getAssignmentManager().markRegionAsClosed(regionNode);
+    AssignmentManager am = env.getAssignmentManager();
+    RegionInfo regionInfo = getRegionInfo();
+
+    if (!removeAfterUnassigning) {
+      am.markRegionAsClosed(regionNode);
+    } else {
+      // Remove from in-memory states
+      am.getRegionStates().deleteRegion(regionInfo);
+      env.getMasterServices().getServerManager().removeRegion(regionInfo);
+      FavoredNodesManager fnm = env.getMasterServices().getFavoredNodesManager();
+      if (fnm != null) {
+        fnm.deleteFavoredNodesForRegions(Lists.newArrayList(regionInfo));
+      }
+    }
   }
 
   @Override
@@ -213,40 +251,97 @@ public class UnassignProcedure extends RegionTransitionProcedure {
     }
   }
 
+  /**
+   * Our remote call failed but there are a few states where it is safe to proceed with the
+   * unassign; e.g. if a server crash and it has had all of its WALs processed, then we can allow
+   * this unassign to go to completion.
+   * @return True if it is safe to proceed with the unassign.
+   */
+  private boolean isSafeToProceed(final MasterProcedureEnv env, final RegionStateNode regionNode,
+    final IOException exception) {
+    if (exception instanceof ServerCrashException) {
+      // This exception comes from ServerCrashProcedure AFTER log splitting. Its a signaling
+      // exception. SCP found this region as a RIT during its processing of the crash.  Its call
+      // into here says it is ok to let this procedure go complete.
+      return true;
+    }
+    if (exception instanceof NotServingRegionException) {
+      LOG.warn("IS OK? ANY LOGS TO REPLAY; ACTING AS THOUGH ALL GOOD {}", regionNode, exception);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Set it up so when procedure is unsuspended, we'll move to the procedure finish.
+   */
+  protected void proceed(final MasterProcedureEnv env, final RegionStateNode regionNode) {
+    try {
+      reportTransition(env, regionNode, TransitionCode.CLOSED, HConstants.NO_SEQNUM);
+    } catch (UnexpectedStateException e) {
+      // Should never happen.
+      throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * @return If true, we will re-wake up this procedure; if false, the procedure stays suspended.
+   */
   @Override
   protected boolean remoteCallFailed(final MasterProcedureEnv env, final RegionStateNode regionNode,
       final IOException exception) {
-    // TODO: Is there on-going rpc to cleanup?
-    if (exception instanceof ServerCrashException) {
-      // This exception comes from ServerCrashProcedure after log splitting.
-      // SCP found this region as a RIT. Its call into here says it is ok to let this procedure go
-      // on to a complete close now. This will release lock on this region so subsequent action on
-      // region can succeed; e.g. the assign that follows this unassign when a move (w/o wait on SCP
-      // the assign could run w/o logs being split so data loss).
-      try {
-        reportTransition(env, regionNode, TransitionCode.CLOSED, HConstants.NO_SEQNUM);
-      } catch (UnexpectedStateException e) {
-        // Should never happen.
-        throw new RuntimeException(e);
-      }
+    // Be careful reading the below; we do returns in middle of the method a few times.
+    if (isSafeToProceed(env, regionNode, exception)) {
+      proceed(env, regionNode);
     } else if (exception instanceof RegionServerAbortedException ||
-        exception instanceof RegionServerStoppedException ||
-        exception instanceof ServerNotRunningYetException) {
-      // TODO
-      // RS is aborting, we cannot offline the region since the region may need to do WAL
-      // recovery. Until we see the RS expiration, we should retry.
-      // TODO: This should be suspend like the below where we call expire on server?
+        exception instanceof RegionServerStoppedException) {
+      // RS is aborting/stopping, we cannot offline the region since the region may need to do WAL
+      // recovery. Until we see the RS expiration, stay suspended; return false.
       LOG.info("Ignoring; waiting on ServerCrashProcedure", exception);
-    } else if (exception instanceof NotServingRegionException) {
-      LOG.info("IS THIS OK? ANY LOGS TO REPLAY; ACTING AS THOUGH ALL GOOD " + regionNode,
-        exception);
-      setTransitionState(RegionTransitionState.REGION_TRANSITION_FINISH);
+      return false;
+    } else if (exception instanceof ServerNotRunningYetException) {
+      // This should not happen. If it does, procedure will be woken-up and we'll retry.
+      // TODO: Needs a pause and backoff?
+      LOG.info("Retry", exception);
     } else {
-      LOG.warn("Expiring server " + this + "; " + regionNode.toShortString() +
-        ", exception=" + exception);
-      env.getMasterServices().getServerManager().expireServer(regionNode.getRegionLocation());
-      // Return false so this procedure stays in suspended state. It will be woken up by a
-      // ServerCrashProcedure when it notices this RIT.
+      // We failed to RPC this server. Set it as expired.
+      ServerName serverName = regionNode.getRegionLocation();
+      LOG.warn("Expiring {}, {} {}; exception={}", serverName, this, regionNode.toShortString(),
+          exception.getClass().getSimpleName());
+      if (!env.getMasterServices().getServerManager().expireServer(serverName)) {
+        // Failed to queue an expire. Lots of possible reasons including it may be already expired.
+        // In ServerCrashProcedure and RecoverMetaProcedure, there is a handleRIT stage where we
+        // will iterator over all the RIT procedures for the related regions of a crashed RS and
+        // fail them with ServerCrashException. You can see the isSafeToProceed method above for
+        // more details.
+        // This can work for most cases, but since we do not hold the region lock in handleRIT,
+        // there could be race that we arrive here after the handleRIT stage of the SCP. So here we
+        // need to check whether it is safe to quit.
+        // Notice that, the first assumption is that we can only quit after the log splitting is
+        // done, as MRP can schedule an AssignProcedure right after us, and if the log splitting has
+        // not been done then there will be data loss. And in SCP, we will change the state from
+        // SPLITTING to OFFLINE(or SPLITTING_META_DONE for meta log processing) after finishing the
+        // log splitting, and then calling handleRIT, so checking the state here can be a safe
+        // fence. If the state is not OFFLINE(or SPLITTING_META_DONE), then we can just leave this
+        // procedure in suspended state as we can make sure that the handleRIT has not been executed
+        // yet and it will wake us up later. And if the state is OFFLINE(or SPLITTING_META_DONE), we
+        // can safely quit since there will be no data loss. There could be duplicated
+        // AssignProcedures for the same region but it is OK as we will do a check at the beginning
+        // of AssignProcedure to prevent double assign. And there we have region lock so there will
+        // be no race.
+        if (env.getAssignmentManager().isLogSplittingDone(serverName, isMeta())) {
+          // Its ok to proceed with this unassign.
+          LOG.info("{} is dead and processed; moving procedure to finished state; {}", serverName,
+            this);
+          proceed(env, regionNode);
+          // Return true; wake up the procedure so we can act on proceed.
+          return true;
+        }
+      }
+      // Return false so this procedure stays in suspended state. It will be woken up by the
+      // ServerCrashProcedure that was scheduled when we called #expireServer above. SCP calls
+      // #handleRIT which will call this method only the exception will be a ServerCrashException
+      // this time around (See above).
       // TODO: Add a SCP as a new subprocedure that we now come to depend on.
       return false;
     }

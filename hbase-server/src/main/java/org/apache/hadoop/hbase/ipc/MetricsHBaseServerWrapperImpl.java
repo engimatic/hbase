@@ -19,6 +19,9 @@
 
 package org.apache.hadoop.hbase.ipc;
 
+import org.apache.yetus.audience.InterfaceAudience;
+
+@InterfaceAudience.Private
 public class MetricsHBaseServerWrapperImpl implements MetricsHBaseServerWrapper {
 
   private RpcServer server;
@@ -77,6 +80,30 @@ public class MetricsHBaseServerWrapperImpl implements MetricsHBaseServerWrapper 
       return 0;
     }
     return server.getScheduler().getActiveRpcHandlerCount();
+  }
+
+  @Override
+  public int getActiveGeneralRpcHandlerCount() {
+    if (!isServerStarted() || this.server.getScheduler() == null) {
+      return 0;
+    }
+    return server.getScheduler().getActiveGeneralRpcHandlerCount();
+  }
+
+  @Override
+  public int getActivePriorityRpcHandlerCount() {
+    if (!isServerStarted() || this.server.getScheduler() == null) {
+      return 0;
+    }
+    return server.getScheduler().getActivePriorityRpcHandlerCount();
+  }
+
+  @Override
+  public int getActiveReplicationRpcHandlerCount() {
+    if (!isServerStarted() || this.server.getScheduler() == null) {
+      return 0;
+    }
+    return server.getScheduler().getActiveReplicationRpcHandlerCount();
   }
 
   @Override

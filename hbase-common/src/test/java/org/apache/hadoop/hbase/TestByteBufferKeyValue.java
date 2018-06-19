@@ -1,38 +1,47 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements. See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership. The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.hadoop.hbase;
 
+import static junit.framework.TestCase.assertTrue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
 @Category({ MiscTests.class, SmallTests.class })
 public class TestByteBufferKeyValue {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestByteBufferKeyValue.class);
+
   private static final String QUAL2 = "qual2";
   private static final String FAM2 = "fam2";
   private static final String QUAL1 = "qual1";
@@ -49,6 +58,38 @@ public class TestByteBufferKeyValue {
   static {
     tags.add(t1);
     tags.add(t2);
+  }
+
+  @Test
+  public void testCompare() {
+    Cell cell1 = getOffheapCell(row1, fam1, qual1);
+    Cell cell2 = getOffheapCell(row1, fam1, qual2);
+    assertTrue(CellComparatorImpl.COMPARATOR.compare(cell1, cell2) < 0);
+    Cell cell3 = getOffheapCell(row1, Bytes.toBytes("wide_family"), qual2);
+    assertTrue(CellComparatorImpl.COMPARATOR.compare(cell1, cell3) < 0);
+    Cell cell4 = getOffheapCell(row1, Bytes.toBytes("f"), qual2);
+    assertTrue(CellComparatorImpl.COMPARATOR.compare(cell1, cell4) > 0);
+    BBKVComparator comparator = new BBKVComparator(null);
+    assertTrue(comparator.compare(cell1, cell2) < 0);
+    assertTrue(comparator.compare(cell1, cell3) < 0);
+    assertTrue(comparator.compare(cell1, cell4) > 0);
+    ByteBuffer buf = ByteBuffer.allocate(row1.length);
+    ByteBufferUtils.copyFromArrayToBuffer(buf, row1, 0, row1.length);
+
+    ConcurrentSkipListMap<ByteBufferKeyValue, ByteBufferKeyValue> map =
+        new ConcurrentSkipListMap<>(comparator);
+    map.put((ByteBufferKeyValue)cell1, (ByteBufferKeyValue)cell1);
+    map.put((ByteBufferKeyValue)cell2, (ByteBufferKeyValue)cell2);
+    map.put((ByteBufferKeyValue)cell3, (ByteBufferKeyValue)cell3);
+    map.put((ByteBufferKeyValue)cell1, (ByteBufferKeyValue)cell1);
+    map.put((ByteBufferKeyValue)cell1, (ByteBufferKeyValue)cell1);
+  }
+
+  private static Cell getOffheapCell(byte [] row, byte [] family, byte [] qualifier) {
+    KeyValue kvCell = new KeyValue(row, family, qualifier, 0L, Type.Put, row);
+    ByteBuffer buf = ByteBuffer.allocateDirect(kvCell.getBuffer().length);
+    ByteBufferUtils.copyFromArrayToBuffer(buf, kvCell.getBuffer(), 0, kvCell.getBuffer().length);
+    return new ByteBufferKeyValue(buf, 0, buf.capacity(), 0L);
   }
 
   @Test

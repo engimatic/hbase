@@ -34,18 +34,17 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.util.MapReduceExtendedCell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Delete;
@@ -69,6 +68,7 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.VerySlowMapReduceTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.LauncherSecurityManager;
+import org.apache.hadoop.hbase.util.MapReduceExtendedCell;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALKey;
@@ -80,6 +80,7 @@ import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -94,6 +95,10 @@ import org.slf4j.LoggerFactory;
  */
 @Category({VerySlowMapReduceTests.class, MediumTests.class})
 public class TestImportExport {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestImportExport.class);
 
   private static final Logger LOG = LoggerFactory.getLogger(TestImportExport.class);
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
@@ -292,7 +297,7 @@ public class TestImportExport {
    public void testExportScannerBatching() throws Throwable {
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(1)
               .build())
             .build();
@@ -322,7 +327,7 @@ public class TestImportExport {
   public void testWithDeletes() throws Throwable {
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -355,7 +360,7 @@ public class TestImportExport {
     final String IMPORT_TABLE = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(IMPORT_TABLE))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -390,7 +395,7 @@ public class TestImportExport {
     final TableName exportTable = TableName.valueOf(name.getMethodName());
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -428,7 +433,7 @@ public class TestImportExport {
     final String importTable = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(importTable))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -470,7 +475,7 @@ public class TestImportExport {
     // Create simple table to export
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .build())
             .build();
@@ -498,7 +503,7 @@ public class TestImportExport {
     final String IMPORT_TABLE = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(IMPORT_TABLE))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .build())
             .build();
@@ -532,9 +537,9 @@ public class TestImportExport {
   }
 
   /**
-   * Count the number of keyvalues in the specified table for the given timerange
-   * @param table
-   * @return
+   * Count the number of keyvalues in the specified table with the given filter
+   * @param table the table to scan
+   * @return the number of keyvalues found
    * @throws IOException
    */
   private int getCount(Table table, Filter filter) throws IOException {
@@ -786,7 +791,7 @@ public class TestImportExport {
 
     @Override
     public void visitLogEntryBeforeWrite(WALKey logKey, WALEdit logEdit) {
-      if (logKey.getTablename().getNameAsString().equalsIgnoreCase(
+      if (logKey.getTableName().getNameAsString().equalsIgnoreCase(
           this.regionInfo.getTable().getNameAsString()) && (!logEdit.isMetaEdit())) {
         isVisited = true;
       }

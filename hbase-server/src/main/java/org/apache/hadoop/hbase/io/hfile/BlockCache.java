@@ -126,6 +126,7 @@ public interface BlockCache extends Iterable<CachedBlock> {
   /**
    * @return Iterator over the blocks in the cache.
    */
+  @Override
   Iterator<CachedBlock> iterator();
 
   /**
@@ -143,5 +144,5 @@ public interface BlockCache extends Iterable<CachedBlock> {
    * @param cacheKey the cache key of the block
    * @param block the hfileblock to be returned
    */
-  default void returnBlock(BlockCacheKey cacheKey, Cacheable block){};
+  default void returnBlock(BlockCacheKey cacheKey, Cacheable block){}
 }

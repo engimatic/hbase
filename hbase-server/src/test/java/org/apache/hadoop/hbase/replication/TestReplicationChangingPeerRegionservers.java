@@ -1,5 +1,4 @@
-/*
- *
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,7 +22,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.List;
 
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
@@ -35,18 +36,44 @@ import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableList;
 
 /**
  * Test handling of changes to the number of a peer's regionservers.
  */
-@Category({ReplicationTests.class, LargeTests.class})
+@RunWith(Parameterized.class)
+@Category({ ReplicationTests.class, LargeTests.class })
 public class TestReplicationChangingPeerRegionservers extends TestReplicationBase {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestReplicationChangingPeerRegionservers.class);
+
   private static final Logger LOG =
       LoggerFactory.getLogger(TestReplicationChangingPeerRegionservers.class);
+
+  @Parameter
+  public boolean serialPeer;
+
+  @Override
+  protected boolean isSerialPeer() {
+    return serialPeer;
+  }
+
+  @Parameters(name = "{index}: serialPeer={0}")
+  public static List<Boolean> parameters() {
+    return ImmutableList.of(true, false);
+  }
 
   /**
    * @throws java.lang.Exception
@@ -55,8 +82,8 @@ public class TestReplicationChangingPeerRegionservers extends TestReplicationBas
   public void setUp() throws Exception {
     // Starting and stopping replication can make us miss new logs,
     // rolling like this makes sure the most recent one gets added to the queue
-    for (JVMClusterUtil.RegionServerThread r :
-                          utility1.getHBaseCluster().getRegionServerThreads()) {
+    for (JVMClusterUtil.RegionServerThread r : utility1.getHBaseCluster()
+        .getRegionServerThreads()) {
       utility1.getAdmin().rollWALWriter(r.getRegionServer().getServerName());
     }
     utility1.deleteTableData(tableName);
@@ -87,9 +114,8 @@ public class TestReplicationChangingPeerRegionservers extends TestReplicationBas
     }
   }
 
-  @Test(timeout = 300000)
+  @Test
   public void testChangingNumberOfPeerRegionServers() throws IOException, InterruptedException {
-
     LOG.info("testSimplePutDelete");
     MiniHBaseCluster peerCluster = utility2.getMiniHBaseCluster();
     int numRS = peerCluster.getRegionServerThreads().size();
@@ -111,7 +137,6 @@ public class TestReplicationChangingPeerRegionservers extends TestReplicationBas
     assertEquals(numRS, peerCluster.getRegionServerThreads().size());
 
     doPutTest(Bytes.toBytes(3));
-
   }
 
   private void doPutTest(byte[] row) throws IOException, InterruptedException {

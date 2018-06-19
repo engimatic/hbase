@@ -19,38 +19,56 @@ package org.apache.hadoop.hbase;
 
 import static org.junit.Assert.*;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.util.NoSuchElementException;
-import java.util.Queue;
-import java.util.Random;
-import java.util.LinkedList;
-
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.PerformanceEvaluation.RandomReadTest;
-import org.apache.hadoop.hbase.PerformanceEvaluation.TestOptions;
-import org.apache.hadoop.hbase.testclassification.MiscTests;
-import org.apache.hadoop.hbase.testclassification.SmallTests;
-import org.junit.Ignore;
-import org.junit.Test;
-import org.junit.experimental.categories.Category;
-
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.UniformReservoir;
 import com.fasterxml.jackson.core.JsonGenerationException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.util.LinkedList;
+import java.util.NoSuchElementException;
+import java.util.Queue;
+import java.util.Random;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.PerformanceEvaluation.RandomReadTest;
+import org.apache.hadoop.hbase.PerformanceEvaluation.TestOptions;
+import org.apache.hadoop.hbase.regionserver.CompactingMemStore;
+import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.junit.ClassRule;
+import org.junit.Ignore;
+import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestPerformanceEvaluation {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestPerformanceEvaluation.class);
+
   private static final HBaseTestingUtility HTU = new HBaseTestingUtility();
+
+  @Test
+  public void testDefaultInMemoryCompaction() {
+    PerformanceEvaluation.TestOptions defaultOpts =
+        new PerformanceEvaluation.TestOptions();
+    assertEquals(CompactingMemStore.COMPACTING_MEMSTORE_TYPE_DEFAULT.toString(),
+        defaultOpts.getInMemoryCompaction().toString());
+    HTableDescriptor htd = PerformanceEvaluation.getTableDescriptor(defaultOpts);
+    for (HColumnDescriptor hcd: htd.getFamilies()) {
+      assertEquals(CompactingMemStore.COMPACTING_MEMSTORE_TYPE_DEFAULT.toString(),
+          hcd.getInMemoryCompaction().toString());
+    }
+  }
 
   @Test
   public void testSerialization()
@@ -175,6 +193,16 @@ public class TestPerformanceEvaluation {
   }
 
   @Test
+  public void testSetBufferSizeOption() {
+    TestOptions opts = new PerformanceEvaluation.TestOptions();
+    long bufferSize = opts.getBufferSize();
+    assertEquals(bufferSize, 2l * 1024l * 1024l);
+    opts.setBufferSize(64l * 1024l);
+    bufferSize = opts.getBufferSize();
+    assertEquals(bufferSize, 64l * 1024l);
+  }
+
+  @Test
   public void testParseOptsWithThreads() {
     Queue<String> opts = new LinkedList<>();
     String cmdName = "sequentialWrite";
@@ -214,5 +242,51 @@ public class TestPerformanceEvaluation {
       assertEquals("Command " + cmdName + " does not have threads number", e.getMessage());
       assertTrue(e.getCause() instanceof NoSuchElementException);
     }
+  }
+
+  @Test
+  public void testParseOptsMultiPuts() {
+    Queue<String> opts = new LinkedList<>();
+    String cmdName = "sequentialWrite";
+    opts.offer("--multiPut=10");
+    opts.offer(cmdName);
+    opts.offer("64");
+    PerformanceEvaluation.TestOptions options = null;
+    try {
+      options = PerformanceEvaluation.parseOpts(opts);
+      fail("should fail");
+    } catch (IllegalArgumentException  e) {
+      System.out.println(e.getMessage());
+    }
+    ((LinkedList<String>) opts).offerFirst("--multiPut=10");
+    ((LinkedList<String>) opts).offerFirst("--autoFlush=true");
+    options = PerformanceEvaluation.parseOpts(opts);
+    assertNotNull(options);
+    assertNotNull(options.getCmdName());
+    assertEquals(cmdName, options.getCmdName());
+    assertTrue(options.getMultiPut() == 10);
+  }
+
+  @Test
+  public void testParseOptsConnCount() {
+    Queue<String> opts = new LinkedList<>();
+    String cmdName = "sequentialWrite";
+    opts.offer("--oneCon=true");
+    opts.offer("--connCount=10");
+    opts.offer(cmdName);
+    opts.offer("64");
+    PerformanceEvaluation.TestOptions options = null;
+    try {
+      options = PerformanceEvaluation.parseOpts(opts);
+      fail("should fail");
+    } catch (IllegalArgumentException  e) {
+      System.out.println(e.getMessage());
+    }
+    ((LinkedList<String>) opts).offerFirst("--connCount=10");
+    options = PerformanceEvaluation.parseOpts(opts);
+    assertNotNull(options);
+    assertNotNull(options.getCmdName());
+    assertEquals(cmdName, options.getCmdName());
+    assertTrue(options.getConnCount() == 10);
   }
 }

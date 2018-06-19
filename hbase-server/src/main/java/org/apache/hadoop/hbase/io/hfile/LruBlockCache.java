@@ -380,15 +380,20 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
 
     LruCachedBlock cb = map.get(cacheKey);
     if (cb != null) {
-      // compare the contents, if they are not equal, we are in big trouble
-      if (BlockCacheUtil.compareCacheBlock(buf, cb.getBuffer()) != 0) {
-        throw new RuntimeException("Cached block contents differ, which should not have happened."
-          + "cacheKey:" + cacheKey);
+      int comparison = BlockCacheUtil.validateBlockAddition(cb.getBuffer(), buf, cacheKey);
+      if (comparison != 0) {
+        if (comparison < 0) {
+          LOG.warn("Cached block contents differ by nextBlockOnDiskSize. Keeping cached block.");
+          return;
+        } else {
+          LOG.warn("Cached block contents differ by nextBlockOnDiskSize. Caching new block.");
+        }
+      } else {
+        String msg = "Cached an already cached block: " + cacheKey + " cb:" + cb.getCacheKey();
+        msg += ". This is harmless and can happen in rare cases (see HBASE-8547)";
+        LOG.debug(msg);
+        return;
       }
-      String msg = "Cached an already cached block: " + cacheKey + " cb:" + cb.getCacheKey();
-      msg += ". This is harmless and can happen in rare cases (see HBASE-8547)";
-      LOG.warn(msg);
-      return;
     }
     long currentSize = size.get();
     long currentAcceptableSize = acceptableSize();
@@ -448,6 +453,7 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
    * @param cacheKey block's cache key
    * @param buf      block buffer
    */
+  @Override
   public void cacheBlock(BlockCacheKey cacheKey, Cacheable buf) {
     cacheBlock(cacheKey, buf, false);
   }
@@ -730,15 +736,15 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
   public String toString() {
     return MoreObjects.toStringHelper(this)
       .add("blockCount", getBlockCount())
-      .add("currentSize", getCurrentSize())
-      .add("freeSize", getFreeSize())
-      .add("maxSize", getMaxSize())
-      .add("heapSize", heapSize())
-      .add("minSize", minSize())
+      .add("currentSize", StringUtils.byteDesc(getCurrentSize()))
+      .add("freeSize", StringUtils.byteDesc(getFreeSize()))
+      .add("maxSize", StringUtils.byteDesc(getMaxSize()))
+      .add("heapSize", StringUtils.byteDesc(heapSize()))
+      .add("minSize", StringUtils.byteDesc(minSize()))
       .add("minFactor", minFactor)
-      .add("multiSize", multiSize())
+      .add("multiSize", StringUtils.byteDesc(multiSize()))
       .add("multiFactor", multiFactor)
-      .add("singleSize", singleSize())
+      .add("singleSize", StringUtils.byteDesc(singleSize()))
       .add("singleFactor", singleFactor)
       .toString();
   }
@@ -794,6 +800,7 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
       return totalSize;
     }
 
+    @Override
     public int compareTo(BlockBucket that) {
       return Long.compare(this.overflow(), that.overflow());
     }
@@ -970,6 +977,7 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
    * <p>Includes: total accesses, hits, misses, evicted blocks, and runs
    * of the eviction processes.
    */
+  @Override
   public CacheStats getStats() {
     return this.stats;
   }
@@ -1096,6 +1104,7 @@ public class LruBlockCache implements ResizableBlockCache, HeapSize {
     return (long) Math.floor(this.maxSize * this.memoryFactor * this.minFactor);
   }
 
+  @Override
   public void shutdown() {
     if (victimHandler != null) {
       victimHandler.shutdown();

@@ -1,4 +1,5 @@
- /*
+/**
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -33,7 +34,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
-
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ClusterMetrics;
@@ -41,7 +41,7 @@ import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseIOException;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HDFSBlocksDistribution;
-import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.ServerMetrics;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionInfo;
@@ -51,6 +51,7 @@ import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.RackManager;
 import org.apache.hadoop.hbase.master.RegionPlan;
 import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer.Cluster.Action.Type;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,14 +68,15 @@ import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
  * actual balancing algorithm.
  *
  */
+@InterfaceAudience.Private
 public abstract class BaseLoadBalancer implements LoadBalancer {
   protected static final int MIN_SERVER_BALANCE = 2;
   private volatile boolean stopped = false;
 
   private static final List<RegionInfo> EMPTY_REGION_LIST = new ArrayList<>(0);
 
-  static final Predicate<ServerLoad> IDLE_SERVER_PREDICATOR
-    = load -> load.getNumberOfRegions() == 0;
+  static final Predicate<ServerMetrics> IDLE_SERVER_PREDICATOR
+    = load -> load.getRegionMetrics().isEmpty();
 
   protected RegionLocationFinder regionFinder;
   protected boolean useRegionFinder;
@@ -1149,6 +1151,19 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     }
   }
 
+  @Override
+  public void postMasterStartupInitialize() {
+    if (services != null && regionFinder != null) {
+      try {
+        Set<RegionInfo> regions =
+            services.getAssignmentManager().getRegionStates().getRegionAssignments().keySet();
+        regionFinder.refreshAndWait(regions);
+      } catch (Exception e) {
+        LOG.warn("Refreshing region HDFS Block dist failed with exception, ignoring", e);
+      }
+    }
+  }
+
   public void setRackManager(RackManager rackManager) {
     this.rackManager = rackManager;
   }
@@ -1247,7 +1262,7 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
       return assignments;
     }
 
-    Cluster cluster = createCluster(servers, regions, false);
+    Cluster cluster = createCluster(servers, regions);
     List<RegionInfo> unassignedRegions = new ArrayList<>();
 
     roundRobinAssignment(cluster, regions, unassignedRegions,
@@ -1286,11 +1301,7 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     return assignments;
   }
 
-  protected Cluster createCluster(List<ServerName> servers,
-      Collection<RegionInfo> regions, boolean forceRefresh) {
-    if (forceRefresh && useRegionFinder) {
-      regionFinder.refreshAndWait(regions);
-    }
+  protected Cluster createCluster(List<ServerName> servers, Collection<RegionInfo> regions) {
     // Get the snapshot of the current assignments for the regions in question, and then create
     // a cluster out of it. Note that we might have replicas already assigned to some servers
     // earlier. So we want to get the snapshot to see those assignments, but this will only contain
@@ -1344,7 +1355,7 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     final List<ServerName> finalServers = idleServers.isEmpty() ?
             servers : idleServers;
     List<RegionInfo> regions = Lists.newArrayList(regionInfo);
-    Cluster cluster = createCluster(finalServers, regions, false);
+    Cluster cluster = createCluster(finalServers, regions);
     return randomAssignment(cluster, regionInfo, finalServers);
   }
 
@@ -1403,7 +1414,7 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     ArrayListMultimap<String, ServerName> serversByHostname = ArrayListMultimap.create();
     for (ServerName server : servers) {
       assignments.put(server, new ArrayList<>());
-      serversByHostname.put(server.getHostname(), server);
+      serversByHostname.put(server.getHostnameLowerCase(), server);
     }
 
     // Collection of the hostnames that used to have regions
@@ -1411,50 +1422,66 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     // after the cluster restart.
     Set<String> oldHostsNoLongerPresent = Sets.newTreeSet();
 
+    // If the old servers aren't present, lets assign those regions later.
+    List<RegionInfo> randomAssignRegions = Lists.newArrayList();
+
     int numRandomAssignments = 0;
     int numRetainedAssigments = 0;
-
-    Cluster cluster = createCluster(servers, regions.keySet(), true);
 
     for (Map.Entry<RegionInfo, ServerName> entry : regions.entrySet()) {
       RegionInfo region = entry.getKey();
       ServerName oldServerName = entry.getValue();
       List<ServerName> localServers = new ArrayList<>();
       if (oldServerName != null) {
-        localServers = serversByHostname.get(oldServerName.getHostname());
+        localServers = serversByHostname.get(oldServerName.getHostnameLowerCase());
       }
       if (localServers.isEmpty()) {
-        // No servers on the new cluster match up with this hostname,
-        // assign randomly.
-        ServerName randomServer = randomAssignment(cluster, region, servers);
-        assignments.get(randomServer).add(region);
-        numRandomAssignments++;
-        if (oldServerName != null) oldHostsNoLongerPresent.add(oldServerName.getHostname());
+        // No servers on the new cluster match up with this hostname, assign randomly, later.
+        randomAssignRegions.add(region);
+        if (oldServerName != null) {
+          oldHostsNoLongerPresent.add(oldServerName.getHostnameLowerCase());
+        }
       } else if (localServers.size() == 1) {
         // the usual case - one new server on same host
         ServerName target = localServers.get(0);
         assignments.get(target).add(region);
-        cluster.doAssignRegion(region, target);
         numRetainedAssigments++;
       } else {
         // multiple new servers in the cluster on this same host
         if (localServers.contains(oldServerName)) {
           assignments.get(oldServerName).add(region);
-          cluster.doAssignRegion(region, oldServerName);
+          numRetainedAssigments++;
         } else {
           ServerName target = null;
-          for (ServerName tmp: localServers) {
+          for (ServerName tmp : localServers) {
             if (tmp.getPort() == oldServerName.getPort()) {
               target = tmp;
+              assignments.get(tmp).add(region);
+              numRetainedAssigments++;
               break;
             }
           }
           if (target == null) {
-            target = randomAssignment(cluster, region, localServers);
+            randomAssignRegions.add(region);
           }
-          assignments.get(target).add(region);
         }
-        numRetainedAssigments++;
+      }
+    }
+
+    // If servers from prior assignment aren't present, then lets do randomAssignment on regions.
+    if (randomAssignRegions.size() > 0) {
+      Cluster cluster = createCluster(servers, regions.keySet());
+      for (Map.Entry<ServerName, List<RegionInfo>> entry : assignments.entrySet()) {
+        ServerName sn = entry.getKey();
+        for (RegionInfo region : entry.getValue()) {
+          cluster.doAssignRegion(region, sn);
+        }
+      }
+      for (RegionInfo region : randomAssignRegions) {
+        ServerName target = randomAssignment(cluster, region, servers);
+        assignments.get(target).add(region);
+        cluster.doAssignRegion(region, target);
+        numRandomAssignments++;
       }
     }
 

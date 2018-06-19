@@ -23,12 +23,14 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.util.Random;
-
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -36,6 +38,8 @@ import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.StoppableImplementation;
 import org.junit.After;
+import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
@@ -47,8 +51,17 @@ import org.slf4j.LoggerFactory;
 @Category({MasterTests.class, SmallTests.class})
 public class TestCleanerChore {
 
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestCleanerChore.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestCleanerChore.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
+
+  @Before
+  public void setup() throws Exception {
+    CleanerChore.initChorePool(UTIL.getConfiguration());
+  }
 
   @After
   public void cleanup() throws Exception {
@@ -78,9 +91,55 @@ public class TestCleanerChore {
     // run the chore
     chore.chore();
 
-    // verify all the files got deleted
-    assertTrue("File didn't get deleted", fs.exists(file));
-    assertTrue("Empty directory didn't get deleted", fs.exists(parent));
+    // verify all the files were preserved
+    assertTrue("File shouldn't have been deleted", fs.exists(file));
+    assertTrue("directory shouldn't have been deleted", fs.exists(parent));
+  }
+
+  @Test
+  public void retriesIOExceptionInStatus() throws Exception {
+    Stoppable stop = new StoppableImplementation();
+    Configuration conf = UTIL.getConfiguration();
+    Path testDir = UTIL.getDataTestDir();
+    FileSystem fs = UTIL.getTestFileSystem();
+    String confKey = "hbase.test.cleaner.delegates";
+
+    Path child = new Path(testDir, "child");
+    Path file = new Path(child, "file");
+    fs.mkdirs(child);
+    fs.create(file).close();
+    assertTrue("test file didn't get created.", fs.exists(file));
+    final AtomicBoolean fails = new AtomicBoolean(true);
+
+    FilterFileSystem filtered = new FilterFileSystem(fs) {
+      public FileStatus[] listStatus(Path f) throws IOException {
+        if (fails.get()) {
+          throw new IOException("whomp whomp.");
+        }
+        return fs.listStatus(f);
+      }
+    };
+
+    AllValidPaths chore = new AllValidPaths("test-retry-ioe", stop, conf, filtered, testDir, confKey);
+
+    // trouble talking to the filesystem
+    Boolean result = chore.runCleaner();
+
+    // verify that it couldn't clean the files.
+    assertTrue("test rig failed to inject failure.", fs.exists(file));
+    assertTrue("test rig failed to inject failure.", fs.exists(child));
+    // and verify that it accurately reported the failure.
+    assertFalse("chore should report that it failed.", result);
+
+    // filesystem is back
+    fails.set(false);
+    result = chore.runCleaner();
+
+    // verify everything is gone.
+    assertFalse("file should have been destroyed.", fs.exists(file));
+    assertFalse("directory should have been destroyed.", fs.exists(child));
+    // and verify that it accurately reported success.
+    assertTrue("chore should claim it succeeded.", result);
   }
 
   @Test
@@ -356,13 +415,22 @@ public class TestCleanerChore {
 
   @Test
   public void testOnConfigurationChange() throws Exception {
+    int availableProcessorNum = Runtime.getRuntime().availableProcessors();
+    if (availableProcessorNum == 1) { // no need to run this test
+      return;
+    }
+
+    // have at least 2 available processors/cores
+    int    initPoolSize = availableProcessorNum / 2;
+    int changedPoolSize = availableProcessorNum;
+
     Stoppable stop = new StoppableImplementation();
     Configuration conf = UTIL.getConfiguration();
     Path testDir = UTIL.getDataTestDir();
     FileSystem fs = UTIL.getTestFileSystem();
     String confKey = "hbase.test.cleaner.delegates";
     conf.set(confKey, AlwaysDelete.class.getName());
-    conf.set(CleanerChore.CHORE_POOL_SIZE, "2");
+    conf.set(CleanerChore.CHORE_POOL_SIZE, String.valueOf(initPoolSize));
     AllValidPaths chore = new AllValidPaths("test-file-cleaner", stop, conf, fs, testDir, confKey);
     chore.setEnabled(true);
     // Create subdirs under testDir
@@ -381,11 +449,30 @@ public class TestCleanerChore {
     t.setDaemon(true);
     t.start();
     // Change size of chore's pool
-    conf.set(CleanerChore.CHORE_POOL_SIZE, "4");
+    conf.set(CleanerChore.CHORE_POOL_SIZE, String.valueOf(changedPoolSize));
     chore.onConfigurationChange(conf);
-    assertEquals(4, chore.getChorePoolSize());
+    assertEquals(changedPoolSize, chore.getChorePoolSize());
     // Stop chore
     t.join();
+  }
+
+  @Test
+  public void testMinimumNumberOfThreads() throws Exception {
+    Stoppable stop = new StoppableImplementation();
+    Configuration conf = UTIL.getConfiguration();
+    Path testDir = UTIL.getDataTestDir();
+    FileSystem fs = UTIL.getTestFileSystem();
+    String confKey = "hbase.test.cleaner.delegates";
+    conf.set(confKey, AlwaysDelete.class.getName());
+    conf.set(CleanerChore.CHORE_POOL_SIZE, "2");
+    AllValidPaths chore = new AllValidPaths("test-file-cleaner", stop, conf, fs, testDir, confKey);
+    int numProcs = Runtime.getRuntime().availableProcessors();
+    // Sanity
+    assertEquals(numProcs, chore.calculatePoolSize(Integer.toString(numProcs)));
+    // The implementation does not allow us to set more threads than we have processors
+    assertEquals(numProcs, chore.calculatePoolSize(Integer.toString(numProcs + 2)));
+    // Force us into the branch that is multiplying 0.0 against the number of processors
+    assertEquals(1, chore.calculatePoolSize("0.0"));
   }
 
   private void createFiles(FileSystem fs, Path parentDir, int numOfFiles) throws IOException {
@@ -414,7 +501,7 @@ public class TestCleanerChore {
     protected boolean validate(Path file) {
       return true;
     }
-  };
+  }
 
   public static class AlwaysDelete extends BaseHFileCleanerDelegate {
     @Override

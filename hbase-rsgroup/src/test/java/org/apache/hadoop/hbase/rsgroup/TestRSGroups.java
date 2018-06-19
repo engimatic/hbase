@@ -23,7 +23,10 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.Iterator;
+import java.util.Optional;
+import java.util.Set;
 
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -36,10 +39,16 @@ import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.Waiter.Predicate;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
-import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.coprocessor.MasterCoprocessor;
+import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.MasterObserver;
+import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
 import org.apache.hadoop.hbase.master.ServerManager;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
 import org.apache.hadoop.hbase.net.Address;
+import org.apache.hadoop.hbase.quotas.QuotaTableUtil;
+import org.apache.hadoop.hbase.quotas.QuotaUtil;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.After;
@@ -47,22 +56,28 @@ import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 
 @Category({MediumTests.class})
 public class TestRSGroups extends TestRSGroupsBase {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestRSGroups.class);
+
   protected static final Logger LOG = LoggerFactory.getLogger(TestRSGroups.class);
-  private static HMaster master;
   private static boolean INIT = false;
   private static RSGroupAdminEndpoint rsGroupAdminEndpoint;
-
+  private static CPMasterObserver observer;
 
   @BeforeClass
   public static void setUp() throws Exception {
@@ -73,13 +88,17 @@ public class TestRSGroups extends TestRSGroupsBase {
         HConstants.HBASE_MASTER_LOADBALANCER_CLASS,
         RSGroupBasedLoadBalancer.class.getName());
     TEST_UTIL.getConfiguration().set(CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY,
-        RSGroupAdminEndpoint.class.getName());
+        RSGroupAdminEndpoint.class.getName() + "," + CPMasterObserver.class.getName());
     TEST_UTIL.startMiniCluster(NUM_SLAVES_BASE - 1);
     TEST_UTIL.getConfiguration().setInt(
         ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART,
         NUM_SLAVES_BASE - 1);
     TEST_UTIL.getConfiguration().setBoolean(SnapshotManager.HBASE_SNAPSHOT_ENABLED, true);
 
+    initialize();
+  }
+
+  private static void initialize() throws Exception {
     admin = TEST_UTIL.getAdmin();
     cluster = TEST_UTIL.getHBaseCluster();
     master = ((MiniHBaseCluster)cluster).getMaster();
@@ -95,8 +114,10 @@ public class TestRSGroups extends TestRSGroupsBase {
     admin.setBalancerRunning(false,true);
     rsGroupAdmin = new VerifyingRSGroupAdminClient(
         new RSGroupAdminClient(TEST_UTIL.getConnection()), TEST_UTIL.getConfiguration());
+    MasterCoprocessorHost host = master.getMasterCoprocessorHost();
+    observer = (CPMasterObserver) host.findCoprocessor(CPMasterObserver.class.getName());
     rsGroupAdminEndpoint = (RSGroupAdminEndpoint)
-        master.getMasterCoprocessorHost().findCoprocessor(RSGroupAdminEndpoint.class.getName());
+        host.findCoprocessor(RSGroupAdminEndpoint.class.getName());
   }
 
   @AfterClass
@@ -119,6 +140,11 @@ public class TestRSGroups extends TestRSGroupsBase {
     deleteNamespaceIfNecessary();
     deleteGroups();
 
+    for(ServerName sn : admin.listDecommissionedRegionServers()){
+      admin.recommissionRegionServer(sn, null);
+    }
+    assertTrue(admin.listDecommissionedRegionServers().isEmpty());
+
     int missing = NUM_SLAVES_BASE - getNumServers();
     LOG.info("Restoring servers: "+missing);
     for(int i=0; i<missing; i++) {
@@ -134,6 +160,7 @@ public class TestRSGroups extends TestRSGroupsBase {
     } catch (Exception ex) {
       LOG.warn("Got this on setup, FYI", ex);
     }
+    assertTrue(observer.preMoveServersCalled);
     TEST_UTIL.waitFor(WAIT_TIMEOUT, new Waiter.Predicate<Exception>() {
       @Override
       public boolean evaluate() throws Exception {
@@ -207,6 +234,9 @@ public class TestRSGroups extends TestRSGroupsBase {
     String groupName = tablePrefix+"_foo";
     LOG.info("testNamespaceConstraint");
     rsGroupAdmin.addRSGroup(groupName);
+    assertTrue(observer.preAddRSGroupCalled);
+    assertTrue(observer.postAddRSGroupCalled);
+
     admin.createNamespace(NamespaceDescriptor.create(nsName)
         .addConfiguration(RSGroupInfo.NAMESPACE_DESC_PROP_GROUP, groupName)
         .build());
@@ -227,6 +257,8 @@ public class TestRSGroups extends TestRSGroupsBase {
     //test add non-existent group
     admin.deleteNamespace(nsName);
     rsGroupAdmin.removeRSGroup(groupName);
+    assertTrue(observer.preRemoveRSGroupCalled);
+    assertTrue(observer.postRemoveRSGroupCalled);
     try {
       admin.createNamespace(NamespaceDescriptor.create(nsName)
           .addConfiguration(RSGroupInfo.NAMESPACE_DESC_PROP_GROUP, "foo")
@@ -247,6 +279,206 @@ public class TestRSGroups extends TestRSGroupsBase {
     it.next();
   }
 
+  public static class CPMasterObserver implements MasterCoprocessor, MasterObserver {
+    boolean preBalanceRSGroupCalled = false;
+    boolean postBalanceRSGroupCalled = false;
+    boolean preMoveServersCalled = false;
+    boolean postMoveServersCalled = false;
+    boolean preMoveTablesCalled = false;
+    boolean postMoveTablesCalled = false;
+    boolean preAddRSGroupCalled = false;
+    boolean postAddRSGroupCalled = false;
+    boolean preRemoveRSGroupCalled = false;
+    boolean postRemoveRSGroupCalled = false;
+    boolean preRemoveServersCalled = false;
+    boolean postRemoveServersCalled = false;
+    boolean preMoveServersAndTables = false;
+    boolean postMoveServersAndTables = false;
+    boolean preGetRSGroupInfoCalled = false;
+    boolean postGetRSGroupInfoCalled = false;
+    boolean preGetRSGroupInfoOfTableCalled = false;
+    boolean postGetRSGroupInfoOfTableCalled = false;
+    boolean preListRSGroupsCalled = false;
+    boolean postListRSGroupsCalled = false;
+    boolean preGetRSGroupInfoOfServerCalled = false;
+    boolean postGetRSGroupInfoOfServerCalled = false;
+
+    @Override
+    public Optional<MasterObserver> getMasterObserver() {
+      return Optional.of(this);
+    }
+    @Override
+    public void preMoveServersAndTables(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers, Set<TableName> tables, String targetGroup) throws IOException {
+      preMoveServersAndTables = true;
+    }
+    @Override
+    public void postMoveServersAndTables(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers, Set<TableName> tables, String targetGroup) throws IOException {
+      postMoveServersAndTables = true;
+    }
+    @Override
+    public void preRemoveServers(
+        final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers) throws IOException {
+      preRemoveServersCalled = true;
+    }
+    @Override
+    public void postRemoveServers(
+        final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers) throws IOException {
+      postRemoveServersCalled = true;
+    }
+    @Override
+    public void preRemoveRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String name) throws IOException {
+      preRemoveRSGroupCalled = true;
+    }
+    @Override
+    public void postRemoveRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String name) throws IOException {
+      postRemoveRSGroupCalled = true;
+    }
+    @Override
+    public void preAddRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String name) throws IOException {
+      preAddRSGroupCalled = true;
+    }
+    @Override
+    public void postAddRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String name) throws IOException {
+      postAddRSGroupCalled = true;
+    }
+    @Override
+    public void preMoveTables(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<TableName> tables, String targetGroup) throws IOException {
+      preMoveTablesCalled = true;
+    }
+    @Override
+    public void postMoveTables(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<TableName> tables, String targetGroup) throws IOException {
+      postMoveTablesCalled = true;
+    }
+    @Override
+    public void preMoveServers(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers, String targetGroup) throws IOException {
+      preMoveServersCalled = true;
+    }
+
+    @Override
+    public void postMoveServers(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        Set<Address> servers, String targetGroup) throws IOException {
+      postMoveServersCalled = true;
+    }
+    @Override
+    public void preBalanceRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String groupName) throws IOException {
+      preBalanceRSGroupCalled = true;
+    }
+    @Override
+    public void postBalanceRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        String groupName, boolean balancerRan) throws IOException {
+      postBalanceRSGroupCalled = true;
+    }
+
+    @Override
+    public void preGetRSGroupInfo(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final String groupName) throws IOException {
+      preGetRSGroupInfoCalled = true;
+    }
+
+    @Override
+    public void postGetRSGroupInfo(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final String groupName) throws IOException {
+      postGetRSGroupInfoCalled = true;
+    }
+
+    @Override
+    public void preGetRSGroupInfoOfTable(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final TableName tableName) throws IOException {
+      preGetRSGroupInfoOfTableCalled = true;
+    }
+
+    @Override
+    public void postGetRSGroupInfoOfTable(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final TableName tableName) throws IOException {
+      postGetRSGroupInfoOfTableCalled = true;
+    }
+
+    @Override
+    public void preListRSGroups(final ObserverContext<MasterCoprocessorEnvironment> ctx)
+        throws IOException {
+      preListRSGroupsCalled = true;
+    }
+
+    @Override
+    public void postListRSGroups(final ObserverContext<MasterCoprocessorEnvironment> ctx)
+        throws IOException {
+      postListRSGroupsCalled = true;
+    }
+
+    @Override
+    public void preGetRSGroupInfoOfServer(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final Address server) throws IOException {
+      preGetRSGroupInfoOfServerCalled = true;
+    }
+
+    @Override
+    public void postGetRSGroupInfoOfServer(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+        final Address server) throws IOException {
+      postGetRSGroupInfoOfServerCalled = true;
+    }
+  }
+
+  @Test
+  public void testGetRSGroupInfoCPHookCalled() throws Exception {
+    rsGroupAdmin.getRSGroupInfo(RSGroupInfo.DEFAULT_GROUP);
+    assertTrue(observer.preGetRSGroupInfoCalled);
+    assertTrue(observer.postGetRSGroupInfoCalled);
+  }
+
+  @Test
+  public void testGetRSGroupInfoOfTableCPHookCalled() throws Exception {
+    rsGroupAdmin.getRSGroupInfoOfTable(TableName.META_TABLE_NAME);
+    assertTrue(observer.preGetRSGroupInfoOfTableCalled);
+    assertTrue(observer.postGetRSGroupInfoOfTableCalled);
+  }
+
+  @Test
+  public void testListRSGroupsCPHookCalled() throws Exception {
+    rsGroupAdmin.listRSGroups();
+    assertTrue(observer.preListRSGroupsCalled);
+    assertTrue(observer.postListRSGroupsCalled);
+  }
+
+  @Test
+  public void testGetRSGroupInfoOfServerCPHookCalled() throws Exception {
+    ServerName masterServerName = ((MiniHBaseCluster) cluster).getMaster().getServerName();
+    rsGroupAdmin.getRSGroupOfServer(masterServerName.getAddress());
+    assertTrue(observer.preGetRSGroupInfoOfServerCalled);
+    assertTrue(observer.postGetRSGroupInfoOfServerCalled);
+  }
+
+  @Test
+  public void testMoveServersAndTables() throws Exception {
+    super.testMoveServersAndTables();
+    assertTrue(observer.preMoveServersAndTables);
+    assertTrue(observer.postMoveServersAndTables);
+  }
+  @Test
+  public void testTableMoveTruncateAndDrop() throws Exception {
+    super.testTableMoveTruncateAndDrop();
+    assertTrue(observer.preMoveTablesCalled);
+    assertTrue(observer.postMoveTablesCalled);
+  }
+
+  @Test
+  public void testRemoveServers() throws Exception {
+    super.testRemoveServers();
+    assertTrue(observer.preRemoveServersCalled);
+    assertTrue(observer.postRemoveServersCalled);
+  }
+
   @Test
   public void testMisplacedRegions() throws Exception {
     final TableName tableName = TableName.valueOf(tablePrefix+"_testMisplacedRegions");
@@ -263,6 +495,8 @@ public class TestRSGroups extends TestRSGroupsBase {
     admin.setBalancerRunning(true,true);
     assertTrue(rsGroupAdmin.balanceRSGroup(RSGroupInfo.getName()));
     admin.setBalancerRunning(false,true);
+    assertTrue(observer.preBalanceRSGroupCalled);
+    assertTrue(observer.postBalanceRSGroupCalled);
 
     TEST_UTIL.waitFor(60000, new Predicate<Exception>() {
       @Override
@@ -291,4 +525,29 @@ public class TestRSGroups extends TestRSGroupsBase {
     admin.cloneSnapshot(snapshotName, clonedTableName);
   }
 
+  @Test
+  public void testRSGroupsWithHBaseQuota() throws Exception {
+    TEST_UTIL.getConfiguration().setBoolean(QuotaUtil.QUOTA_CONF_KEY, true);
+    restartHBaseCluster();
+    try {
+      TEST_UTIL.waitFor(90000, new Waiter.Predicate<Exception>() {
+        @Override
+        public boolean evaluate() throws Exception {
+          return admin.isTableAvailable(QuotaTableUtil.QUOTA_TABLE_NAME);
+        }
+      });
+    } finally {
+      TEST_UTIL.getConfiguration().setBoolean(QuotaUtil.QUOTA_CONF_KEY, false);
+      restartHBaseCluster();
+    }
+  }
+
+  private void restartHBaseCluster() throws Exception {
+    LOG.info("\n\nShutting down cluster");
+    TEST_UTIL.shutdownMiniHBaseCluster();
+    LOG.info("\n\nSleeping a bit");
+    Thread.sleep(2000);
+    TEST_UTIL.restartHBaseCluster(NUM_SLAVES_BASE - 1);
+    initialize();
+  }
 }

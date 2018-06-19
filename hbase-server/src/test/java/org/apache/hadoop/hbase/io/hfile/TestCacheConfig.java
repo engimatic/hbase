@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -27,24 +26,25 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryUsage;
 import java.nio.ByteBuffer;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.testclassification.IOTests;
-import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.io.hfile.BlockType.BlockCategory;
 import org.apache.hadoop.hbase.io.hfile.Cacheable.MemoryType;
 import org.apache.hadoop.hbase.io.hfile.bucket.BucketCache;
 import org.apache.hadoop.hbase.io.util.MemorySizeUtil;
 import org.apache.hadoop.hbase.nio.ByteBuff;
+import org.apache.hadoop.hbase.testclassification.IOTests;
+import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
@@ -59,6 +59,11 @@ import org.slf4j.LoggerFactory;
 // tests clash on the global variable if this test is run as small sized test.
 @Category({IOTests.class, LargeTests.class})
 public class TestCacheConfig {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestCacheConfig.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestCacheConfig.class);
   private Configuration conf;
 
@@ -87,7 +92,7 @@ public class TestCacheConfig {
       LOG.info("Deserialized " + b);
       return cacheable;
     }
-  };
+  }
 
   static class IndexCacheEntry extends DataCacheEntry {
     private static IndexCacheEntry SINGLETON = new IndexCacheEntry();
@@ -118,7 +123,7 @@ public class TestCacheConfig {
     @Override
     public String toString() {
       return "size=" + SIZE + ", type=" + getBlockType();
-    };
+    }
 
     @Override
     public long heapSize() {
@@ -131,7 +136,7 @@ public class TestCacheConfig {
     }
 
     @Override
-    public void serialize(ByteBuffer destination) {
+    public void serialize(ByteBuffer destination, boolean includeNextBlockMetadata) {
       LOG.info("Serialized " + this + " to " + destination);
     }
 
@@ -149,7 +154,7 @@ public class TestCacheConfig {
     public MemoryType getMemoryType() {
       return MemoryType.EXCLUSIVE;
     }
-  };
+  }
 
   static class MetaCacheEntry extends DataCacheEntry {
     @Override
@@ -321,7 +326,7 @@ public class TestCacheConfig {
    * Assert that when BUCKET_CACHE_COMBINED_KEY is false, the non-default, that we deploy
    * LruBlockCache as L1 with a BucketCache for L2.
    */
-  @Test (timeout=10000)
+  @Test
   public void testBucketCacheConfigL1L2Setup() {
     this.conf.set(HConstants.BUCKET_CACHE_IOENGINE_KEY, "offheap");
     // Make lru size is smaller than bcSize for sure.  Need this to be true so when eviction

@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.collections4.MapUtils;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellBuilderFactory;
 import org.apache.hadoop.hbase.CellBuilderType;
@@ -73,8 +72,10 @@ import org.apache.hadoop.hbase.thrift2.generated.TTimeRange;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.yetus.audience.InterfaceAudience;
 
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.MapUtils;
+
 @InterfaceAudience.Private
-public class ThriftUtilities {
+public final class ThriftUtilities {
 
   private ThriftUtilities() {
     throw new UnsupportedOperationException("Can't initialize class");
@@ -96,7 +97,7 @@ public class ThriftUtilities {
 
     // Timestamp overwrites time range if both are set
     if (in.isSetTimestamp()) {
-      out.setTimeStamp(in.getTimestamp());
+      out.setTimestamp(in.getTimestamp());
     } else if (in.isSetTimeRange()) {
       out.setTimeRange(in.getTimeRange().getMinStamp(), in.getTimeRange().getMaxStamp());
     }
@@ -234,7 +235,7 @@ public class ThriftUtilities {
               .setRow(out.getRow())
               .setFamily(columnValue.getFamily())
               .setQualifier(columnValue.getQualifier())
-              .setTimestamp(out.getTimeStamp())
+              .setTimestamp(out.getTimestamp())
               .setType(Cell.Type.Put)
               .setValue(columnValue.getValue())
               .build());
@@ -287,35 +288,37 @@ public class ThriftUtilities {
       for (TColumn column : in.getColumns()) {
         if (in.isSetDeleteType()) {
           switch (in.getDeleteType()) {
-          case DELETE_COLUMN:
-            if (column.isSetTimestamp()) {
-              out.addColumn(column.getFamily(), column.getQualifier(), column.getTimestamp());
-            } else {
-              out.addColumn(column.getFamily(), column.getQualifier());
-            }
-            break;
-          case DELETE_COLUMNS:
-            if (column.isSetTimestamp()) {
-              out.addColumns(column.getFamily(), column.getQualifier(), column.getTimestamp());
-            } else {
-              out.addColumns(column.getFamily(), column.getQualifier());
-            }
-            break;
-          case DELETE_FAMILY:
-            if (column.isSetTimestamp()) {
-              out.addFamily(column.getFamily(), column.getTimestamp());
-            } else {
-              out.addFamily(column.getFamily());
-            }
-            break;
-          case DELETE_FAMILY_VERSION:
-            if (column.isSetTimestamp()) {
-              out.addFamilyVersion(column.getFamily(), column.getTimestamp());
-            } else {
-              throw new IllegalArgumentException(
-                  "Timestamp is required for TDelete with DeleteFamilyVersion type");
-            }
-            break;
+            case DELETE_COLUMN:
+              if (column.isSetTimestamp()) {
+                out.addColumn(column.getFamily(), column.getQualifier(), column.getTimestamp());
+              } else {
+                out.addColumn(column.getFamily(), column.getQualifier());
+              }
+              break;
+            case DELETE_COLUMNS:
+              if (column.isSetTimestamp()) {
+                out.addColumns(column.getFamily(), column.getQualifier(), column.getTimestamp());
+              } else {
+                out.addColumns(column.getFamily(), column.getQualifier());
+              }
+              break;
+            case DELETE_FAMILY:
+              if (column.isSetTimestamp()) {
+                out.addFamily(column.getFamily(), column.getTimestamp());
+              } else {
+                out.addFamily(column.getFamily());
+              }
+              break;
+            case DELETE_FAMILY_VERSION:
+              if (column.isSetTimestamp()) {
+                out.addFamilyVersion(column.getFamily(), column.getTimestamp());
+              } else {
+                throw new IllegalArgumentException(
+                    "Timestamp is required for TDelete with DeleteFamilyVersion type");
+              }
+              break;
+            default:
+              throw new IllegalArgumentException("DeleteType is required for TDelete");
           }
         } else {
           throw new IllegalArgumentException("DeleteType is required for TDelete");
@@ -362,7 +365,7 @@ public class ThriftUtilities {
     TDelete out = new TDelete(ByteBuffer.wrap(in.getRow()));
 
     List<TColumn> columns = new ArrayList<>(in.getFamilyCellMap().entrySet().size());
-    long rowTimestamp = in.getTimeStamp();
+    long rowTimestamp = in.getTimestamp();
     if (rowTimestamp != HConstants.LATEST_TIMESTAMP) {
       out.setTimestamp(rowTimestamp);
     }
@@ -416,12 +419,15 @@ public class ThriftUtilities {
   public static Scan scanFromThrift(TScan in) throws IOException {
     Scan out = new Scan();
 
-    if (in.isSetStartRow())
+    if (in.isSetStartRow()) {
       out.setStartRow(in.getStartRow());
-    if (in.isSetStopRow())
+    }
+    if (in.isSetStopRow()) {
       out.setStopRow(in.getStopRow());
-    if (in.isSetCaching())
+    }
+    if (in.isSetCaching()) {
       out.setCaching(in.getCaching());
+    }
     if (in.isSetMaxVersions()) {
       out.setMaxVersions(in.getMaxVersions());
     }

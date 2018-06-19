@@ -32,7 +32,6 @@ import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
-
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
@@ -44,9 +43,9 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.http.HttpServer.QuotingInputFilter.RequestQuoter;
 import org.apache.hadoop.hbase.http.resource.JerseyResource;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
@@ -61,6 +60,7 @@ import org.eclipse.jetty.util.ajax.JSON;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -70,6 +70,11 @@ import org.slf4j.LoggerFactory;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestHttpServer extends HttpServerFunctionalTest {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestHttpServer.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestHttpServer.class);
   private static HttpServer server;
   private static URL baseUrl;
@@ -317,10 +322,10 @@ public class TestHttpServer extends HttpServerFunctionalTest {
    * will be accessed as the passed user, by sending user.name request
    * parameter.
    *
-   * @param urlstring
-   * @param userName
-   * @return
-   * @throws IOException
+   * @param urlstring The url to access
+   * @param userName The user to perform access as
+   * @return The HTTP response code
+   * @throws IOException if there is a problem communicating with the server
    */
   static int getHttpStatusCode(String urlstring, String userName)
       throws IOException {
@@ -600,8 +605,6 @@ public class TestHttpServer extends HttpServerFunctionalTest {
     myServer.stop();
   }
 
-
-
   @Test
   public void testNoCacheHeader() throws Exception {
     URL url = new URL(baseUrl, "/echo?a=b&c=d");
@@ -613,5 +616,16 @@ public class TestHttpServer extends HttpServerFunctionalTest {
     assertNotNull(conn.getHeaderField("Date"));
     assertEquals(conn.getHeaderField("Expires"), conn.getHeaderField("Date"));
     assertEquals("DENY", conn.getHeaderField("X-Frame-Options"));
+  }
+
+  @Test
+  public void testHttpMethods() throws Exception {
+    // HTTP TRACE method should be disabled for security
+    // See https://www.owasp.org/index.php/Cross_Site_Tracing
+    URL url = new URL(baseUrl, "/echo?a=b");
+    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    conn.setRequestMethod("TRACE");
+    conn.connect();
+    assertEquals(HttpURLConnection.HTTP_FORBIDDEN, conn.getResponseCode());
   }
 }

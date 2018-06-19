@@ -23,7 +23,6 @@ import com.google.protobuf.ServiceException;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,7 +45,6 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MetaTableAccessor.DefaultVisitorBase;
-import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
@@ -74,7 +72,6 @@ import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos;
 import org.apache.hadoop.hbase.protobuf.generated.RSGroupProtos;
 import org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy;
-import org.apache.hadoop.hbase.security.access.AccessControlLists;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
@@ -157,7 +154,6 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
 
   private synchronized void init() throws IOException{
     refresh();
-    rsGroupStartupWorker.start();
     serverEventsListenerThread.start();
     masterServices.getServerManager().registerListener(serverEventsListenerThread);
     failedOpenUpdaterThread = new FailedOpenUpdaterThread(masterServices.getConfiguration());
@@ -169,6 +165,11 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
     RSGroupInfoManagerImpl instance = new RSGroupInfoManagerImpl(master);
     instance.init();
     return instance;
+  }
+
+  public void start(){
+    // create system table of rsgroup
+    rsGroupStartupWorker.start();
   }
 
   @Override
@@ -244,7 +245,7 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
   public synchronized void moveTables(Set<TableName> tableNames, String groupName)
       throws IOException {
     if (groupName != null && !rsGroupMap.containsKey(groupName)) {
-      throw new DoNotRetryIOException("Group "+groupName+" does not exist or is a special group");
+      throw new DoNotRetryIOException("Group "+groupName+" does not exist");
     }
 
     Map<String,RSGroupInfo> newGroupMap = Maps.newHashMap(rsGroupMap);
@@ -346,12 +347,16 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
   }
 
   List<RSGroupInfo> retrieveGroupListFromZookeeper() throws IOException {
-    String groupBasePath = ZNodePaths.joinZNode(watcher.znodePaths.baseZNode, rsGroupZNode);
+    String groupBasePath = ZNodePaths.joinZNode(watcher.getZNodePaths().baseZNode, rsGroupZNode);
     List<RSGroupInfo> RSGroupInfoList = Lists.newArrayList();
     //Overwrite any info stored by table, this takes precedence
     try {
       if(ZKUtil.checkExists(watcher, groupBasePath) != -1) {
-        for(String znode: ZKUtil.listChildrenAndWatchForNewChildren(watcher, groupBasePath)) {
+        List<String> children = ZKUtil.listChildrenAndWatchForNewChildren(watcher, groupBasePath);
+        if (children == null) {
+          return RSGroupInfoList;
+        }
+        for(String znode: children) {
           byte[] data = ZKUtil.getData(watcher, ZNodePaths.joinZNode(groupBasePath, znode));
           if(data.length > 0) {
             ProtobufUtil.expectPBMagicPrefix(data);
@@ -398,19 +403,6 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
     NavigableSet<TableName> orphanTables = new TreeSet<>();
     for(String entry: masterServices.getTableDescriptors().getAll().keySet()) {
       orphanTables.add(TableName.valueOf(entry));
-    }
-
-    final List<TableName> specialTables;
-    if(!masterServices.isInitialized()) {
-      specialTables = Arrays.asList(AccessControlLists.ACL_TABLE_NAME, TableName.META_TABLE_NAME,
-          TableName.NAMESPACE_TABLE_NAME, RSGROUP_TABLE_NAME);
-    } else {
-      specialTables =
-          masterServices.listTableNamesByNamespace(NamespaceDescriptor.SYSTEM_NAMESPACE_NAME_STR);
-    }
-
-    for (TableName table : specialTables) {
-      orphanTables.add(table);
     }
     for (RSGroupInfo group: groupList) {
       if(!group.getName().equals(RSGroupInfo.DEFAULT_GROUP)) {
@@ -496,7 +488,7 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
     resetRSGroupAndTableMaps(newGroupMap, newTableMap);
 
     try {
-      String groupBasePath = ZNodePaths.joinZNode(watcher.znodePaths.baseZNode, rsGroupZNode);
+      String groupBasePath = ZNodePaths.joinZNode(watcher.getZNodePaths().baseZNode, rsGroupZNode);
       ZKUtil.createAndFailSilent(watcher, groupBasePath, ProtobufMagic.PB_MAGIC);
 
       List<ZKUtil.ZKUtilOp> zkOps = new ArrayList<>(newGroupMap.size());
@@ -557,7 +549,7 @@ final class RSGroupInfoManagerImpl implements RSGroupInfoManager {
     LOG.debug("Reading online RS from zookeeper");
     List<ServerName> servers = new LinkedList<>();
     try {
-      for (String el: ZKUtil.listChildrenNoWatch(watcher, watcher.znodePaths.rsZNode)) {
+      for (String el: ZKUtil.listChildrenNoWatch(watcher, watcher.getZNodePaths().rsZNode)) {
         servers.add(ServerName.parseServerName(el));
       }
     } catch (KeeperException e) {

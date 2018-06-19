@@ -32,13 +32,13 @@ import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.CollectionUtils;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.yetus.audience.InterfaceAudience;
 
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
 
 /**
  * A WAL Entry for {@link AbstractFSWAL} implementation.  Immutable.
@@ -85,9 +85,10 @@ class FSWALEntry extends Entry {
     }
   }
 
+  @Override
   public String toString() {
     return "sequence=" + this.txid + ", " + super.toString();
-  };
+  }
 
   boolean isInMemStore() {
     return this.inMemstore;
@@ -116,6 +117,7 @@ class FSWALEntry extends Entry {
         PrivateCellUtil.setSequenceId(c, regionSequenceId);
       }
     }
+
     getKey().setWriteEntry(we);
     return regionSequenceId;
   }

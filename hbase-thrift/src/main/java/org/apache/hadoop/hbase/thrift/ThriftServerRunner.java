@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -44,9 +44,6 @@ import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.sasl.AuthorizeCallback;
 import javax.security.sasl.SaslServer;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.OptionGroup;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell.Type;
@@ -82,6 +79,7 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.ParseFilter;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.WhileMatchFilter;
+import org.apache.hadoop.hbase.http.HttpServerUtil;
 import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.security.SaslUtil;
 import org.apache.hadoop.hbase.security.SaslUtil.QualityOfProtection;
@@ -112,7 +110,6 @@ import org.apache.thrift.TException;
 import org.apache.thrift.TProcessor;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TCompactProtocol;
-import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
 import org.apache.thrift.server.THsHaServer;
 import org.apache.thrift.server.TNonblockingServer;
@@ -141,8 +138,12 @@ import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hbase.thirdparty.com.google.common.base.Joiner;
+import org.apache.hbase.thirdparty.com.google.common.base.Splitter;
 import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
 import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Option;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.OptionGroup;
 
 /**
  * ThriftServerRunner - this class starts up a Thrift server which implements
@@ -161,21 +162,33 @@ public class ThriftServerRunner implements Runnable {
   static final String BIND_CONF_KEY = "hbase.regionserver.thrift.ipaddress";
   static final String COMPACT_CONF_KEY = "hbase.regionserver.thrift.compact";
   static final String FRAMED_CONF_KEY = "hbase.regionserver.thrift.framed";
-  static final String MAX_FRAME_SIZE_CONF_KEY = "hbase.regionserver.thrift.framed.max_frame_size_in_mb";
+  static final String MAX_FRAME_SIZE_CONF_KEY =
+          "hbase.regionserver.thrift.framed.max_frame_size_in_mb";
   static final String PORT_CONF_KEY = "hbase.regionserver.thrift.port";
   static final String COALESCE_INC_KEY = "hbase.regionserver.thrift.coalesceIncrement";
   static final String USE_HTTP_CONF_KEY = "hbase.regionserver.thrift.http";
-  static final String HTTP_MIN_THREADS = "hbase.thrift.http_threads.min";
-  static final String HTTP_MAX_THREADS = "hbase.thrift.http_threads.max";
+  static final String HTTP_MIN_THREADS_KEY = "hbase.thrift.http_threads.min";
+  static final String HTTP_MAX_THREADS_KEY = "hbase.thrift.http_threads.max";
 
-  static final String THRIFT_SSL_ENABLED = "hbase.thrift.ssl.enabled";
-  static final String THRIFT_SSL_KEYSTORE_STORE = "hbase.thrift.ssl.keystore.store";
-  static final String THRIFT_SSL_KEYSTORE_PASSWORD = "hbase.thrift.ssl.keystore.password";
-  static final String THRIFT_SSL_KEYSTORE_KEYPASSWORD = "hbase.thrift.ssl.keystore.keypassword";
-  static final String THRIFT_SSL_EXCLUDE_CIPHER_SUITES = "hbase.thrift.ssl.exclude.cipher.suites";
-  static final String THRIFT_SSL_INCLUDE_CIPHER_SUITES = "hbase.thrift.ssl.include.cipher.suites";
-  static final String THRIFT_SSL_EXCLUDE_PROTOCOLS = "hbase.thrift.ssl.exclude.protocols";
-  static final String THRIFT_SSL_INCLUDE_PROTOCOLS = "hbase.thrift.ssl.include.protocols";
+  static final String THRIFT_SSL_ENABLED_KEY = "hbase.thrift.ssl.enabled";
+  static final String THRIFT_SSL_KEYSTORE_STORE_KEY = "hbase.thrift.ssl.keystore.store";
+  static final String THRIFT_SSL_KEYSTORE_PASSWORD_KEY = "hbase.thrift.ssl.keystore.password";
+  static final String THRIFT_SSL_KEYSTORE_KEYPASSWORD_KEY = "hbase.thrift.ssl.keystore.keypassword";
+  static final String THRIFT_SSL_EXCLUDE_CIPHER_SUITES_KEY =
+      "hbase.thrift.ssl.exclude.cipher.suites";
+  static final String THRIFT_SSL_INCLUDE_CIPHER_SUITES_KEY =
+      "hbase.thrift.ssl.include.cipher.suites";
+  static final String THRIFT_SSL_EXCLUDE_PROTOCOLS_KEY = "hbase.thrift.ssl.exclude.protocols";
+  static final String THRIFT_SSL_INCLUDE_PROTOCOLS_KEY = "hbase.thrift.ssl.include.protocols";
+
+  static final String THRIFT_SUPPORT_PROXYUSER_KEY = "hbase.thrift.support.proxyuser";
+
+  static final String THRIFT_DNS_INTERFACE_KEY = "hbase.thrift.dns.interface";
+  static final String THRIFT_DNS_NAMESERVER_KEY = "hbase.thrift.dns.nameserver";
+  static final String THRIFT_KERBEROS_PRINCIPAL_KEY = "hbase.thrift.kerberos.principal";
+  static final String THRIFT_KEYTAB_FILE_KEY = "hbase.thrift.keytab.file";
+  static final String THRIFT_SPNEGO_PRINCIPAL_KEY = "hbase.thrift.spnego.principal";
+  static final String THRIFT_SPNEGO_KEYTAB_FILE_KEY = "hbase.thrift.spnego.keytab.file";
 
   /**
    * Amount of time in milliseconds before a server thread will timeout
@@ -202,7 +215,7 @@ public class ThriftServerRunner implements Runnable {
   private static final String DEFAULT_BIND_ADDR = "0.0.0.0";
   public static final int DEFAULT_LISTEN_PORT = 9090;
   public static final int HREGION_VERSION = 1;
-  static final String THRIFT_SUPPORT_PROXYUSER = "hbase.thrift.support.proxyuser";
+
   private final int listenPort;
 
   private Configuration conf;
@@ -211,7 +224,7 @@ public class ThriftServerRunner implements Runnable {
   private final Hbase.Iface handler;
   private final ThriftMetrics metrics;
   private final HBaseHandler hbaseHandler;
-  private final UserGroupInformation realUser;
+  private final UserGroupInformation serviceUGI;
 
   private SaslUtil.QualityOfProtection qop;
   private String host;
@@ -221,13 +234,15 @@ public class ThriftServerRunner implements Runnable {
 
   private final JvmPauseMonitor pauseMonitor;
 
+  static String THRIFT_HTTP_ALLOW_OPTIONS_METHOD = "hbase.thrift.http.allow.options.method";
+  private static boolean THRIFT_HTTP_ALLOW_OPTIONS_METHOD_DEFAULT = false;
+
   /** An enum of server implementation selections */
-  enum ImplType {
+  public enum ImplType {
     HS_HA("hsha", true, THsHaServer.class, true),
     NONBLOCKING("nonblocking", true, TNonblockingServer.class, true),
     THREAD_POOL("threadpool", false, TBoundedThreadPoolServer.class, true),
-    THREADED_SELECTOR(
-        "threadedselector", true, TThreadedSelectorServer.class, true);
+    THREADED_SELECTOR("threadedselector", true, TThreadedSelectorServer.class, true);
 
     public static final ImplType DEFAULT = THREAD_POOL;
 
@@ -236,7 +251,7 @@ public class ThriftServerRunner implements Runnable {
     final Class<? extends TServer> serverClass;
     final boolean canSpecifyBindIP;
 
-    ImplType(String option, boolean isAlwaysFramed,
+    private ImplType(String option, boolean isAlwaysFramed,
         Class<? extends TServer> serverClass, boolean canSpecifyBindIP) {
       this.option = option;
       this.isAlwaysFramed = isAlwaysFramed;
@@ -245,15 +260,22 @@ public class ThriftServerRunner implements Runnable {
     }
 
     /**
-     * @return <code>-option</code> so we can get the list of options from
-     *         {@link #values()}
+     * @return <code>-option</code>
      */
     @Override
     public String toString() {
       return "-" + option;
     }
 
-    String getDescription() {
+    public String getOption() {
+      return option;
+    }
+
+    public boolean isAlwaysFramed() {
+      return isAlwaysFramed;
+    }
+
+    public String getDescription() {
       StringBuilder sb = new StringBuilder("Use the " +
           serverClass.getSimpleName());
       if (isAlwaysFramed) {
@@ -273,7 +295,7 @@ public class ThriftServerRunner implements Runnable {
       return group;
     }
 
-    static ImplType getServerImpl(Configuration conf) {
+    public static ImplType getServerImpl(Configuration conf) {
       String confType = conf.get(SERVER_TYPE_CONF_KEY, THREAD_POOL.option);
       for (ImplType t : values()) {
         if (confType.equals(t.option)) {
@@ -316,54 +338,62 @@ public class ThriftServerRunner implements Runnable {
       }
       return l;
     }
-
   }
 
   public ThriftServerRunner(Configuration conf) throws IOException {
-    UserProvider userProvider = UserProvider.instantiate(conf);
     // login the server principal (if using secure Hadoop)
+    UserProvider userProvider = UserProvider.instantiate(conf);
     securityEnabled = userProvider.isHadoopSecurityEnabled()
-      && userProvider.isHBaseSecurityEnabled();
+        && userProvider.isHBaseSecurityEnabled();
     if (securityEnabled) {
       host = Strings.domainNamePointerToHostName(DNS.getDefaultHost(
-        conf.get("hbase.thrift.dns.interface", "default"),
-        conf.get("hbase.thrift.dns.nameserver", "default")));
-      userProvider.login("hbase.thrift.keytab.file",
-        "hbase.thrift.kerberos.principal", host);
+        conf.get(THRIFT_DNS_INTERFACE_KEY, "default"),
+        conf.get(THRIFT_DNS_NAMESERVER_KEY, "default")));
+      userProvider.login(THRIFT_KEYTAB_FILE_KEY, THRIFT_KERBEROS_PRINCIPAL_KEY, host);
     }
+    this.serviceUGI = userProvider.getCurrent().getUGI();
+
     this.conf = HBaseConfiguration.create(conf);
     this.listenPort = conf.getInt(PORT_CONF_KEY, DEFAULT_LISTEN_PORT);
     this.metrics = new ThriftMetrics(conf, ThriftMetrics.ThriftServerType.ONE);
     this.pauseMonitor = new JvmPauseMonitor(conf, this.metrics.getSource());
     this.hbaseHandler = new HBaseHandler(conf, userProvider);
     this.hbaseHandler.initMetrics(metrics);
-    this.handler = HbaseHandlerMetricsProxy.newInstance(
-      hbaseHandler, metrics, conf);
-    this.realUser = userProvider.getCurrent().getUGI();
+    this.handler = HbaseHandlerMetricsProxy.newInstance(hbaseHandler, metrics, conf);
+
+    boolean httpEnabled = conf.getBoolean(USE_HTTP_CONF_KEY, false);
+    doAsEnabled = conf.getBoolean(THRIFT_SUPPORT_PROXYUSER_KEY, false);
+    if (doAsEnabled && !httpEnabled) {
+      LOG.warn("Fail to enable the doAs feature. " + USE_HTTP_CONF_KEY + " is not configured");
+    }
+
     String strQop = conf.get(THRIFT_QOP_KEY);
     if (strQop != null) {
       this.qop = SaslUtil.getQop(strQop);
-    }
-    doAsEnabled = conf.getBoolean(THRIFT_SUPPORT_PROXYUSER, false);
-    if (doAsEnabled) {
-      if (!conf.getBoolean(USE_HTTP_CONF_KEY, false)) {
-        LOG.warn("Fail to enable the doAs feature. hbase.regionserver.thrift.http is not configured ");
-      }
     }
     if (qop != null) {
       if (qop != QualityOfProtection.AUTHENTICATION &&
           qop != QualityOfProtection.INTEGRITY &&
           qop != QualityOfProtection.PRIVACY) {
-        throw new IOException(String.format("Invalide %s: It must be one of %s, %s, or %s.",
+        throw new IOException(String.format("Invalid %s: It must be one of %s, %s, or %s.",
                               THRIFT_QOP_KEY,
                               QualityOfProtection.AUTHENTICATION.name(),
                               QualityOfProtection.INTEGRITY.name(),
                               QualityOfProtection.PRIVACY.name()));
       }
+      checkHttpSecurity(qop, conf);
       if (!securityEnabled) {
-        throw new IOException("Thrift server must"
-          + " run in secure mode to support authentication");
+        throw new IOException("Thrift server must run in secure mode to support authentication");
       }
+    }
+  }
+
+  private void checkHttpSecurity(QualityOfProtection qop, Configuration conf) {
+    if (qop == QualityOfProtection.PRIVACY &&
+        conf.getBoolean(USE_HTTP_CONF_KEY, false) &&
+        !conf.getBoolean(THRIFT_SSL_ENABLED_KEY, false)) {
+      throw new IllegalArgumentException("Thrift HTTP Server's QoP is privacy, but " +
+          THRIFT_SSL_ENABLED_KEY + " is false");
     }
   }
 
@@ -372,7 +402,7 @@ public class ThriftServerRunner implements Runnable {
    */
   @Override
   public void run() {
-    realUser.doAs(new PrivilegedAction<Object>() {
+    serviceUGI.doAs(new PrivilegedAction<Object>() {
       @Override
       public Object run() {
         try {
@@ -409,7 +439,7 @@ public class ThriftServerRunner implements Runnable {
         httpServer.stop();
         httpServer = null;
       } catch (Exception e) {
-        LOG.error("Problem encountered in shutting down HTTP server " + e.getCause());
+        LOG.error("Problem encountered in shutting down HTTP server", e);
       }
       httpServer = null;
     }
@@ -418,7 +448,7 @@ public class ThriftServerRunner implements Runnable {
   private void setupHTTPServer() throws IOException {
     TProtocolFactory protocolFactory = new TBinaryProtocol.Factory();
     TProcessor processor = new Hbase.Processor<>(handler);
-    TServlet thriftHttpServlet = new ThriftHttpServlet(processor, protocolFactory, realUser,
+    TServlet thriftHttpServlet = new ThriftHttpServlet(processor, protocolFactory, serviceUGI,
         conf, hbaseHandler, securityEnabled, doAsEnabled);
 
     // Set the default max thread number to 100 to limit
@@ -426,15 +456,18 @@ public class ThriftServerRunner implements Runnable {
     // Jetty set the default max thread number to 250, if we don't set it.
     //
     // Our default min thread number 2 is the same as that used by Jetty.
-    int minThreads = conf.getInt(HTTP_MIN_THREADS, 2);
-    int maxThreads = conf.getInt(HTTP_MAX_THREADS, 100);
+    int minThreads = conf.getInt(HTTP_MIN_THREADS_KEY, 2);
+    int maxThreads = conf.getInt(HTTP_MAX_THREADS_KEY, 100);
     QueuedThreadPool threadPool = new QueuedThreadPool(maxThreads);
     threadPool.setMinThreads(minThreads);
     httpServer = new Server(threadPool);
 
     // Context handler
-    ServletContextHandler ctxHandler = new ServletContextHandler(httpServer, "/", ServletContextHandler.SESSIONS);
+    ServletContextHandler ctxHandler = new ServletContextHandler(httpServer, "/",
+            ServletContextHandler.SESSIONS);
     ctxHandler.addServlet(new ServletHolder(thriftHttpServlet), "/*");
+    HttpServerUtil.constrainHttpMethods(ctxHandler,
+      conf.getBoolean(THRIFT_HTTP_ALLOW_OPTIONS_METHOD, THRIFT_HTTP_ALLOW_OPTIONS_METHOD_DEFAULT));
 
     // set up Jetty and run the embedded server
     HttpConfiguration httpConfig = new HttpConfiguration();
@@ -447,39 +480,39 @@ public class ThriftServerRunner implements Runnable {
     httpConfig.setSendDateHeader(false);
 
     ServerConnector serverConnector;
-    if(conf.getBoolean(THRIFT_SSL_ENABLED, false)) {
+    if(conf.getBoolean(THRIFT_SSL_ENABLED_KEY, false)) {
       HttpConfiguration httpsConfig = new HttpConfiguration(httpConfig);
       httpsConfig.addCustomizer(new SecureRequestCustomizer());
 
       SslContextFactory sslCtxFactory = new SslContextFactory();
-      String keystore = conf.get(THRIFT_SSL_KEYSTORE_STORE);
+      String keystore = conf.get(THRIFT_SSL_KEYSTORE_STORE_KEY);
       String password = HBaseConfiguration.getPassword(conf,
-          THRIFT_SSL_KEYSTORE_PASSWORD, null);
+          THRIFT_SSL_KEYSTORE_PASSWORD_KEY, null);
       String keyPassword = HBaseConfiguration.getPassword(conf,
-          THRIFT_SSL_KEYSTORE_KEYPASSWORD, password);
+          THRIFT_SSL_KEYSTORE_KEYPASSWORD_KEY, password);
       sslCtxFactory.setKeyStorePath(keystore);
       sslCtxFactory.setKeyStorePassword(password);
       sslCtxFactory.setKeyManagerPassword(keyPassword);
 
       String[] excludeCiphers = conf.getStrings(
-          THRIFT_SSL_EXCLUDE_CIPHER_SUITES, ArrayUtils.EMPTY_STRING_ARRAY);
+          THRIFT_SSL_EXCLUDE_CIPHER_SUITES_KEY, ArrayUtils.EMPTY_STRING_ARRAY);
       if (excludeCiphers.length != 0) {
         sslCtxFactory.setExcludeCipherSuites(excludeCiphers);
       }
       String[] includeCiphers = conf.getStrings(
-          THRIFT_SSL_INCLUDE_CIPHER_SUITES, ArrayUtils.EMPTY_STRING_ARRAY);
+          THRIFT_SSL_INCLUDE_CIPHER_SUITES_KEY, ArrayUtils.EMPTY_STRING_ARRAY);
       if (includeCiphers.length != 0) {
         sslCtxFactory.setIncludeCipherSuites(includeCiphers);
       }
 
       // Disable SSLv3 by default due to "Poodle" Vulnerability - CVE-2014-3566
       String[] excludeProtocols = conf.getStrings(
-          THRIFT_SSL_EXCLUDE_PROTOCOLS, "SSLv3");
+          THRIFT_SSL_EXCLUDE_PROTOCOLS_KEY, "SSLv3");
       if (excludeProtocols.length != 0) {
         sslCtxFactory.setExcludeProtocols(excludeProtocols);
       }
       String[] includeProtocols = conf.getStrings(
-          THRIFT_SSL_INCLUDE_PROTOCOLS, ArrayUtils.EMPTY_STRING_ARRAY);
+          THRIFT_SSL_INCLUDE_PROTOCOLS_KEY, ArrayUtils.EMPTY_STRING_ARRAY);
       if (includeProtocols.length != 0) {
         sslCtxFactory.setIncludeProtocols(includeProtocols);
       }
@@ -491,8 +524,7 @@ public class ThriftServerRunner implements Runnable {
       serverConnector = new ServerConnector(httpServer, new HttpConnectionFactory(httpConfig));
     }
     serverConnector.setPort(listenPort);
-    String host = getBindAddress(conf).getHostAddress();
-    serverConnector.setHost(host);
+    serverConnector.setHost(getBindAddress(conf).getHostAddress());
     httpServer.addConnector(serverConnector);
     httpServer.setStopAtShutdown(true);
 
@@ -500,7 +532,7 @@ public class ThriftServerRunner implements Runnable {
       ProxyUsers.refreshSuperUserGroupsConfiguration(conf);
     }
 
-    LOG.info("Starting Thrift HTTP Server on " + Integer.toString(listenPort));
+    LOG.info("Starting Thrift HTTP Server on {}", Integer.toString(listenPort));
   }
 
   /**
@@ -508,14 +540,7 @@ public class ThriftServerRunner implements Runnable {
    */
   private void setupServer() throws Exception {
     // Construct correct ProtocolFactory
-    TProtocolFactory protocolFactory;
-    if (conf.getBoolean(COMPACT_CONF_KEY, false)) {
-      LOG.debug("Using compact protocol");
-      protocolFactory = new TCompactProtocol.Factory();
-    } else {
-      LOG.debug("Using binary protocol");
-      protocolFactory = new TBinaryProtocol.Factory();
-    }
+    TProtocolFactory protocolFactory = getProtocolFactory();
 
     final TProcessor p = new Hbase.Processor<>(handler);
     ImplType implType = ImplType.getServerImpl(conf);
@@ -535,8 +560,11 @@ public class ThriftServerRunner implements Runnable {
       transportFactory = new TTransportFactory();
     } else {
       // Extract the name from the principal
-      String name = SecurityUtil.getUserFromPrincipal(
-        conf.get("hbase.thrift.kerberos.principal"));
+      String thriftKerberosPrincipal = conf.get(THRIFT_KERBEROS_PRINCIPAL_KEY);
+      if (thriftKerberosPrincipal == null) {
+        throw new IllegalArgumentException(THRIFT_KERBEROS_PRINCIPAL_KEY + " cannot be null");
+      }
+      String name = SecurityUtil.getUserFromPrincipal(thriftKerberosPrincipal);
       Map<String, String> saslProperties = SaslUtil.initSaslProperties(qop.name());
       TSaslServerTransport.Factory saslFactory = new TSaslServerTransport.Factory();
       saslFactory.addServerDefinition("GSSAPI", name, host, saslProperties,
@@ -561,7 +589,7 @@ public class ThriftServerRunner implements Runnable {
               } else {
                 ac.setAuthorized(true);
                 String userName = SecurityUtil.getUserFromPrincipal(authzid);
-                LOG.info("Effective user: " + userName);
+                LOG.info("Effective user: {}", userName);
                 ac.setAuthorizedID(userName);
               }
             }
@@ -570,27 +598,21 @@ public class ThriftServerRunner implements Runnable {
       transportFactory = saslFactory;
 
       // Create a processor wrapper, to get the caller
-      processor = new TProcessor() {
-        @Override
-        public boolean process(TProtocol inProt,
-            TProtocol outProt) throws TException {
-          TSaslServerTransport saslServerTransport =
-            (TSaslServerTransport)inProt.getTransport();
-          SaslServer saslServer = saslServerTransport.getSaslServer();
-          String principal = saslServer.getAuthorizationID();
-          hbaseHandler.setEffectiveUser(principal);
-          return p.process(inProt, outProt);
-        }
+      processor = (inProt, outProt) -> {
+        TSaslServerTransport saslServerTransport =
+          (TSaslServerTransport)inProt.getTransport();
+        SaslServer saslServer = saslServerTransport.getSaslServer();
+        String principal = saslServer.getAuthorizationID();
+        hbaseHandler.setEffectiveUser(principal);
+        return p.process(inProt, outProt);
       };
     }
 
     if (conf.get(BIND_CONF_KEY) != null && !implType.canSpecifyBindIP) {
-      LOG.error("Server types " + Joiner.on(", ").join(
-          ImplType.serversThatCannotSpecifyBindIP()) + " don't support IP " +
-          "address binding at the moment. See " +
-          "https://issues.apache.org/jira/browse/HBASE-2155 for details.");
-      throw new RuntimeException(
-          "-" + BIND_CONF_KEY + " not supported with " + implType);
+      LOG.error("Server types {} don't support IP address binding at the moment. See " +
+          "https://issues.apache.org/jira/browse/HBASE-2155 for details.",
+          Joiner.on(", ").join(ImplType.serversThatCannotSpecifyBindIP()));
+      throw new RuntimeException("-" + BIND_CONF_KEY + " not supported with " + implType);
     }
 
     // Thrift's implementation uses '0' as a placeholder for 'use the default.'
@@ -614,10 +636,8 @@ public class ThriftServerRunner implements Runnable {
         CallQueue callQueue = new CallQueue(new LinkedBlockingQueue<>(), metrics);
         ExecutorService executorService = createExecutor(
             callQueue, serverArgs.getMaxWorkerThreads(), serverArgs.getMaxWorkerThreads());
-        serverArgs.executorService(executorService)
-                  .processor(processor)
-                  .transportFactory(transportFactory)
-                  .protocolFactory(protocolFactory);
+        serverArgs.executorService(executorService).processor(processor)
+                .transportFactory(transportFactory).protocolFactory(protocolFactory);
         tserver = new THsHaServer(serverArgs);
       } else { // THREADED_SELECTOR
         TThreadedSelectorServer.Args serverArgs =
@@ -625,14 +645,12 @@ public class ThriftServerRunner implements Runnable {
         CallQueue callQueue = new CallQueue(new LinkedBlockingQueue<>(), metrics);
         ExecutorService executorService = createExecutor(
             callQueue, serverArgs.getWorkerThreads(), serverArgs.getWorkerThreads());
-        serverArgs.executorService(executorService)
-                  .processor(processor)
-                  .transportFactory(transportFactory)
-                  .protocolFactory(protocolFactory);
+        serverArgs.executorService(executorService).processor(processor)
+                .transportFactory(transportFactory).protocolFactory(protocolFactory);
         tserver = new TThreadedSelectorServer(serverArgs);
       }
-      LOG.info("starting HBase " + implType.simpleClassName() +
-          " server on " + Integer.toString(listenPort));
+      LOG.info("starting HBase {} server on {}", implType.simpleClassName(),
+          Integer.toString(listenPort));
     } else if (implType == ImplType.THREAD_POOL) {
       // Thread pool server. Get the IP address to bind to.
       InetAddress listenAddress = getBindAddress(conf);
@@ -640,21 +658,17 @@ public class ThriftServerRunner implements Runnable {
           THRIFT_SERVER_SOCKET_READ_TIMEOUT_DEFAULT);
       TServerTransport serverTransport = new TServerSocket(
           new TServerSocket.ServerSocketTransportArgs().
-              bindAddr(new InetSocketAddress(listenAddress, listenPort)).
-              backlog(backlog).
+              bindAddr(new InetSocketAddress(listenAddress, listenPort)).backlog(backlog).
               clientTimeout(readTimeout));
 
       TBoundedThreadPoolServer.Args serverArgs =
           new TBoundedThreadPoolServer.Args(serverTransport, conf);
-      serverArgs.processor(processor)
-                .transportFactory(transportFactory)
-                .protocolFactory(protocolFactory);
+      serverArgs.processor(processor).transportFactory(transportFactory)
+              .protocolFactory(protocolFactory);
       LOG.info("starting " + ImplType.THREAD_POOL.simpleClassName() + " on "
           + listenAddress + ":" + Integer.toString(listenPort)
           + " with readTimeout " + readTimeout + "ms; " + serverArgs);
-      TBoundedThreadPoolServer tserver =
-          new TBoundedThreadPoolServer(serverArgs, metrics);
-      this.tserver = tserver;
+      this.tserver = new TBoundedThreadPoolServer(serverArgs, metrics);
     } else {
       throw new AssertionError("Unsupported Thrift server implementation: " +
           implType.simpleClassName());
@@ -670,6 +684,20 @@ public class ThriftServerRunner implements Runnable {
 
 
     registerFilters(conf);
+  }
+
+  private TProtocolFactory getProtocolFactory() {
+    TProtocolFactory protocolFactory;
+
+    if (conf.getBoolean(COMPACT_CONF_KEY, false)) {
+      LOG.debug("Using compact protocol");
+      protocolFactory = new TCompactProtocol.Factory();
+    } else {
+      LOG.debug("Using binary protocol");
+      protocolFactory = new TBinaryProtocol.Factory();
+    }
+
+    return protocolFactory;
   }
 
   ExecutorService createExecutor(BlockingQueue<Runnable> callQueue,
@@ -697,7 +725,7 @@ public class ThriftServerRunner implements Runnable {
                                 boolean sortResultColumns) {
       scanner = resultScanner;
       sortColumns = sortResultColumns;
-   }
+    }
 
     public ResultScanner getScanner() {
       return scanner;
@@ -718,11 +746,11 @@ public class ThriftServerRunner implements Runnable {
 
     // nextScannerId and scannerMap are used to manage scanner state
     protected int nextScannerId = 0;
-    protected HashMap<Integer, ResultScannerWrapper> scannerMap = null;
+    protected HashMap<Integer, ResultScannerWrapper> scannerMap;
     private ThriftMetrics metrics = null;
 
     private final ConnectionCache connectionCache;
-    IncrementCoalescer coalescer = null;
+    IncrementCoalescer coalescer;
 
     static final String CLEANUP_INTERVAL = "hbase.thrift.connection.cleanup-interval";
     static final String MAX_IDLETIME = "hbase.thrift.connection.max-idletime";
@@ -749,10 +777,9 @@ public class ThriftServerRunner implements Runnable {
      * @param tableName
      *          name of table
      * @return Table object
-     * @throws IOException
+     * @throws IOException if getting the table fails
      */
-    public Table getTable(final byte[] tableName) throws
-        IOException {
+    public Table getTable(final byte[] tableName) throws IOException {
       String table = Bytes.toString(tableName);
       return connectionCache.getTable(table);
     }
@@ -765,10 +792,10 @@ public class ThriftServerRunner implements Runnable {
      * Assigns a unique ID to the scanner and adds the mapping to an internal
      * hash-map.
      *
-     * @param scanner
+     * @param scanner the {@link ResultScanner} to add
      * @return integer scanner id
      */
-    protected synchronized int addScanner(ResultScanner scanner,boolean sortColumns) {
+    protected synchronized int addScanner(ResultScanner scanner, boolean sortColumns) {
       int id = nextScannerId++;
       ResultScannerWrapper resultScannerWrapper = new ResultScannerWrapper(scanner, sortColumns);
       scannerMap.put(id, resultScannerWrapper);
@@ -778,7 +805,7 @@ public class ThriftServerRunner implements Runnable {
     /**
      * Returns the scanner associated with the specified ID.
      *
-     * @param id
+     * @param id the ID of the scanner to get
      * @return a Scanner, or null if ID was invalid.
      */
     protected synchronized ResultScannerWrapper getScanner(int id) {
@@ -789,7 +816,7 @@ public class ThriftServerRunner implements Runnable {
      * Removes the scanner associated with the specified ID from the internal
      * id-&gt;scanner hash-map.
      *
-     * @param id
+     * @param id the ID of the scanner to remove
      * @return a Scanner, or null if ID was invalid.
      */
     protected synchronized ResultScannerWrapper removeScanner(int id) {
@@ -888,8 +915,8 @@ public class ThriftServerRunner implements Runnable {
       try {
         TableName[] tableNames = this.getAdmin().listTableNames();
         ArrayList<ByteBuffer> list = new ArrayList<>(tableNames.length);
-        for (int i = 0; i < tableNames.length; i++) {
-          list.add(ByteBuffer.wrap(tableNames[i].getName()));
+        for (TableName tableName : tableNames) {
+          list.add(ByteBuffer.wrap(tableName.getName()));
         }
         return list;
       } catch (IOException e) {
@@ -902,8 +929,7 @@ public class ThriftServerRunner implements Runnable {
      * @return the list of regions in the given table, or an empty list if the table does not exist
      */
     @Override
-    public List<TRegionInfo> getTableRegions(ByteBuffer tableName)
-    throws IOError {
+    public List<TRegionInfo> getTableRegions(ByteBuffer tableName) throws IOError {
       try (RegionLocator locator = connectionCache.getRegionLocator(getBytes(tableName))) {
         List<HRegionLocation> regionLocations = locator.getAllRegionLocations();
         List<TRegionInfo> results = new ArrayList<>(regionLocations.size());
@@ -1116,9 +1142,9 @@ public class ThriftServerRunner implements Runnable {
         for(ByteBuffer column : columns) {
           byte [][] famAndQf = CellUtil.parseColumn(getBytes(column));
           if (famAndQf.length == 1) {
-              get.addFamily(famAndQf[0]);
+            get.addFamily(famAndQf[0]);
           } else {
-              get.addColumn(famAndQf[0], famAndQf[1]);
+            get.addColumn(famAndQf[0], famAndQf[1]);
           }
         }
         get.setTimeRange(0, timestamp);
@@ -1293,7 +1319,7 @@ public class ThriftServerRunner implements Runnable {
     public void deleteTable(ByteBuffer in_tableName) throws IOError {
       TableName tableName = getTableName(in_tableName);
       if (LOG.isDebugEnabled()) {
-        LOG.debug("deleteTable: table=" + tableName);
+        LOG.debug("deleteTable: table={}", tableName);
       }
       try {
         if (!getAdmin().tableExists(tableName)) {
@@ -1310,8 +1336,7 @@ public class ThriftServerRunner implements Runnable {
     public void mutateRow(ByteBuffer tableName, ByteBuffer row,
         List<Mutation> mutations, Map<ByteBuffer, ByteBuffer> attributes)
         throws IOError, IllegalArgument {
-      mutateRowTs(tableName, row, mutations, HConstants.LATEST_TIMESTAMP,
-                  attributes);
+      mutateRowTs(tableName, row, mutations, HConstants.LATEST_TIMESTAMP, attributes);
     }
 
     @Override
@@ -1341,8 +1366,7 @@ public class ThriftServerRunner implements Runnable {
             } else {
               delete.addColumns(famAndQf[0], famAndQf[1], timestamp);
             }
-            delete.setDurability(m.writeToWAL ? Durability.SYNC_WAL
-                : Durability.SKIP_WAL);
+            delete.setDurability(m.writeToWAL ? Durability.SYNC_WAL : Durability.SKIP_WAL);
           } else {
             if(famAndQf.length == 1) {
               LOG.warn("No column qualifier specified. Delete is the only mutation supported "
@@ -1352,7 +1376,7 @@ public class ThriftServerRunner implements Runnable {
                   .setRow(put.getRow())
                   .setFamily(famAndQf[0])
                   .setQualifier(famAndQf[1])
-                  .setTimestamp(put.getTimeStamp())
+                  .setTimestamp(put.getTimestamp())
                   .setType(Type.Put)
                   .setValue(m.value != null ? getBytes(m.value)
                       : HConstants.EMPTY_BYTE_ARRAY)
@@ -1361,10 +1385,12 @@ public class ThriftServerRunner implements Runnable {
             put.setDurability(m.writeToWAL ? Durability.SYNC_WAL : Durability.SKIP_WAL);
           }
         }
-        if (!delete.isEmpty())
+        if (!delete.isEmpty()) {
           table.delete(delete);
-        if (!put.isEmpty())
+        }
+        if (!put.isEmpty()) {
           table.put(put);
+        }
       } catch (IOException e) {
         LOG.warn(e.getMessage(), e);
         throw getIOError(e);
@@ -1420,7 +1446,7 @@ public class ThriftServerRunner implements Runnable {
                     .setRow(put.getRow())
                     .setFamily(famAndQf[0])
                     .setQualifier(famAndQf[1])
-                    .setTimestamp(put.getTimeStamp())
+                    .setTimestamp(put.getTimestamp())
                     .setType(Type.Put)
                     .setValue(m.value != null ? getBytes(m.value)
                         : HConstants.EMPTY_BYTE_ARRAY)
@@ -1434,20 +1460,23 @@ public class ThriftServerRunner implements Runnable {
             put.setDurability(m.writeToWAL ? Durability.SYNC_WAL : Durability.SKIP_WAL);
           }
         }
-        if (!delete.isEmpty())
+        if (!delete.isEmpty()) {
           deletes.add(delete);
-        if (!put.isEmpty())
+        }
+        if (!put.isEmpty()) {
           puts.add(put);
+        }
       }
 
       Table table = null;
       try {
         table = getTable(tableName);
-        if (!puts.isEmpty())
+        if (!puts.isEmpty()) {
           table.put(puts);
-        if (!deletes.isEmpty())
+        }
+        if (!deletes.isEmpty()) {
           table.delete(deletes);
-
+        }
       } catch (IOException e) {
         LOG.warn(e.getMessage(), e);
         throw getIOError(e);
@@ -1488,11 +1517,10 @@ public class ThriftServerRunner implements Runnable {
 
     @Override
     public void scannerClose(int id) throws IOError, IllegalArgument {
-      LOG.debug("scannerClose: id=" + id);
+      LOG.debug("scannerClose: id={}", id);
       ResultScannerWrapper resultScannerWrapper = getScanner(id);
       if (resultScannerWrapper == null) {
-        String message = "scanner ID is invalid";
-        LOG.warn(message);
+        LOG.warn("scanner ID is invalid");
         throw new IllegalArgument("scanner ID is invalid");
       }
       resultScannerWrapper.getScanner().close();
@@ -1502,7 +1530,7 @@ public class ThriftServerRunner implements Runnable {
     @Override
     public List<TRowResult> scannerGetList(int id,int nbRows)
         throws IllegalArgument, IOError {
-      LOG.debug("scannerGetList: id=" + id);
+      LOG.debug("scannerGetList: id={}", id);
       ResultScannerWrapper resultScannerWrapper = getScanner(id);
       if (null == resultScannerWrapper) {
         String message = "scanner ID is invalid";
@@ -1510,7 +1538,7 @@ public class ThriftServerRunner implements Runnable {
         throw new IllegalArgument("scanner ID is invalid");
       }
 
-      Result [] results = null;
+      Result [] results;
       try {
         results = resultScannerWrapper.getScanner().next(nbRows);
         if (null == results) {
@@ -1553,7 +1581,7 @@ public class ThriftServerRunner implements Runnable {
         if (tScan.isSetBatchSize()) {
           scan.setBatch(tScan.getBatchSize());
         }
-        if (tScan.isSetColumns() && tScan.getColumns().size() != 0) {
+        if (tScan.isSetColumns() && !tScan.getColumns().isEmpty()) {
           for(ByteBuffer column : tScan.getColumns()) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1593,7 +1621,7 @@ public class ThriftServerRunner implements Runnable {
         table = getTable(tableName);
         Scan scan = new Scan(getBytes(startRow));
         addAttributes(scan, attributes);
-        if(columns != null && columns.size() != 0) {
+        if(columns != null && !columns.isEmpty()) {
           for(ByteBuffer column : columns) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1623,7 +1651,7 @@ public class ThriftServerRunner implements Runnable {
         table = getTable(tableName);
         Scan scan = new Scan(getBytes(startRow), getBytes(stopRow));
         addAttributes(scan, attributes);
-        if(columns != null && columns.size() != 0) {
+        if(columns != null && !columns.isEmpty()) {
           for(ByteBuffer column : columns) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1657,7 +1685,7 @@ public class ThriftServerRunner implements Runnable {
         Filter f = new WhileMatchFilter(
             new PrefixFilter(getBytes(startAndPrefix)));
         scan.setFilter(f);
-        if (columns != null && columns.size() != 0) {
+        if (columns != null && !columns.isEmpty()) {
           for(ByteBuffer column : columns) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1687,7 +1715,7 @@ public class ThriftServerRunner implements Runnable {
         Scan scan = new Scan(getBytes(startRow));
         addAttributes(scan, attributes);
         scan.setTimeRange(0, timestamp);
-        if (columns != null && columns.size() != 0) {
+        if (columns != null && !columns.isEmpty()) {
           for (ByteBuffer column : columns) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1718,7 +1746,7 @@ public class ThriftServerRunner implements Runnable {
         Scan scan = new Scan(getBytes(startRow), getBytes(stopRow));
         addAttributes(scan, attributes);
         scan.setTimeRange(0, timestamp);
-        if (columns != null && columns.size() != 0) {
+        if (columns != null && !columns.isEmpty()) {
           for (ByteBuffer column : columns) {
             byte [][] famQf = CellUtil.parseColumn(getBytes(column));
             if(famQf.length == 1) {
@@ -1762,8 +1790,7 @@ public class ThriftServerRunner implements Runnable {
       }
     }
 
-    private void closeTable(Table table) throws IOError
-    {
+    private void closeTable(Table table) throws IOError {
       try{
         if(table != null){
           table.close();
@@ -1819,13 +1846,9 @@ public class ThriftServerRunner implements Runnable {
       scan.setReversed(true);
       scan.addFamily(family);
       scan.setStartRow(row);
-      Table table = getTable(tableName);
-      try (ResultScanner scanner = table.getScanner(scan)) {
+      try (Table table = getTable(tableName);
+           ResultScanner scanner = table.getScanner(scan)) {
         return scanner.next();
-      } finally{
-        if(table != null){
-          table.close();
-        }
       }
     }
 
@@ -1885,7 +1908,7 @@ public class ThriftServerRunner implements Runnable {
         LOG.warn(e.getMessage(), e);
         throw getIOError(e);
       } finally{
-          closeTable(table);
+        closeTable(table);
       }
     }
 
@@ -1903,7 +1926,7 @@ public class ThriftServerRunner implements Runnable {
             .setRow(put.getRow())
             .setFamily(famAndQf[0])
             .setQualifier(famAndQf[1])
-            .setTimestamp(put.getTimeStamp())
+            .setTimestamp(put.getTimestamp())
             .setType(Type.Put)
             .setValue(mput.value != null ? getBytes(mput.value)
                 : HConstants.EMPTY_BYTE_ARRAY)
@@ -1932,11 +1955,10 @@ public class ThriftServerRunner implements Runnable {
         LOG.warn(e.getMessage(), e);
         throw new IllegalArgument(Throwables.getStackTraceAsString(e));
       } finally {
-          closeTable(table);
+        closeTable(table);
       }
     }
   }
-
 
   private static IOError getIOError(Throwable throwable) {
     IOError error = new IOErrorWithCause(throwable);
@@ -1961,26 +1983,27 @@ public class ThriftServerRunner implements Runnable {
 
   public static void registerFilters(Configuration conf) {
     String[] filters = conf.getStrings("hbase.thrift.filters");
+    Splitter splitter = Splitter.on(':');
     if(filters != null) {
       for(String filterClass: filters) {
-        String[] filterPart = filterClass.split(":");
-        if(filterPart.length != 2) {
+        List<String> filterPart = splitter.splitToList(filterClass);
+        if(filterPart.size() != 2) {
           LOG.warn("Invalid filter specification " + filterClass + " - skipping");
         } else {
-          ParseFilter.registerFilter(filterPart[0], filterPart[1]);
+          ParseFilter.registerFilter(filterPart.get(0), filterPart.get(1));
         }
       }
     }
   }
 
   public static class IOErrorWithCause extends IOError {
-    private Throwable cause;
+    private final Throwable cause;
     public IOErrorWithCause(Throwable cause) {
       this.cause = cause;
     }
 
     @Override
-    public Throwable getCause() {
+    public synchronized Throwable getCause() {
       return cause;
     }
 

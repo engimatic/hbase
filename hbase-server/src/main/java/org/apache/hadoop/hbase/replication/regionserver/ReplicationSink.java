@@ -110,7 +110,7 @@ public class ReplicationSink {
     try {
       @SuppressWarnings("rawtypes")
       Class c = Class.forName(className);
-      this.provider = (SourceFSConfigurationProvider) c.newInstance();
+      this.provider = (SourceFSConfigurationProvider) c.getDeclaredConstructor().newInstance();
     } catch (Exception e) {
       throw new IllegalArgumentException("Configured source fs configuration provider class "
           + className + " throws error.", e);
@@ -123,7 +123,7 @@ public class ReplicationSink {
     WALEntrySinkFilter filter = null;
     try {
       filter = walEntryFilterClass == null? null:
-          (WALEntrySinkFilter)walEntryFilterClass.newInstance();
+          (WALEntrySinkFilter)walEntryFilterClass.getDeclaredConstructor().newInstance();
     } catch (Exception e) {
       LOG.warn("Failed to instantiate " + walEntryFilterClass);
     }
@@ -145,6 +145,10 @@ public class ReplicationSink {
     String replicationCodec = this.conf.get(HConstants.REPLICATION_CODEC_CONF_KEY);
     if (StringUtils.isNotEmpty(replicationCodec)) {
       this.conf.set(HConstants.RPC_CODEC_CONF_KEY, replicationCodec);
+    }
+    // use server ZK cluster for replication, so we unset the client ZK related properties if any
+    if (this.conf.get(HConstants.CLIENT_ZOOKEEPER_QUORUM) != null) {
+      this.conf.unset(HConstants.CLIENT_ZOOKEEPER_QUORUM);
     }
    }
 
@@ -404,9 +408,10 @@ public class ReplicationSink {
     } catch (RetriesExhaustedWithDetailsException rewde) {
       for (Throwable ex : rewde.getCauses()) {
         if (ex instanceof TableNotFoundException) {
-          throw new TableNotFoundException("'"+tableName+"'");
+          throw new TableNotFoundException("'" + tableName + "'");
         }
       }
+      throw rewde;
     } catch (InterruptedException ix) {
       throw (InterruptedIOException) new InterruptedIOException().initCause(ix);
     } finally {

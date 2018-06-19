@@ -45,13 +45,15 @@ import org.apache.hadoop.hbase.regionserver.handler.ParallelSeekHandler;
 import org.apache.hadoop.hbase.regionserver.querymatcher.CompactionScanQueryMatcher;
 import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher;
 import org.apache.hadoop.hbase.regionserver.querymatcher.UserScanQueryMatcher;
-import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
-import org.apache.hadoop.hbase.util.CollectionUtils;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.yetus.audience.InterfaceAudience;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
 
 /**
  * Scanner scans both the memstore and the Store. Coalesce KeyValue stream into List&lt;KeyValue&gt;
@@ -551,8 +553,10 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
 
     LOOP: do {
       // Update and check the time limit based on the configured value of cellsPerTimeoutCheck
-      if ((kvsScanned % cellsPerHeartbeatCheck == 0)) {
-        scannerContext.updateTimeProgress();
+      // Or if the preadMaxBytes is reached and we may want to return so we can switch to stream in
+      // the shipped method below.
+      if (kvsScanned % cellsPerHeartbeatCheck == 0 || (scanUsePread &&
+        scan.getReadType() == Scan.ReadType.DEFAULT && bytesRead > preadMaxBytes)) {
         if (scannerContext.checkTimeLimit(LimitScope.BETWEEN_CELLS)) {
           return scannerContext.setScannerState(NextState.TIME_LIMIT_REACHED).hasMoreValues();
         }
@@ -564,6 +568,18 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
       checkScanOrder(prevCell, cell, comparator);
       int cellSize = PrivateCellUtil.estimatedSerializedSizeOf(cell);
       bytesRead += cellSize;
+      if (scanUsePread && scan.getReadType() == Scan.ReadType.DEFAULT &&
+        bytesRead > preadMaxBytes) {
+        // return immediately if we want to switch from pread to stream. We need this because we can
+        // only switch in the shipped method, if user use a filter to filter out everything and rpc
+        // timeout is very large then the shipped method will never be called until the whole scan
+        // is finished, but at that time we have already scan all the data...
+        // See HBASE-20457 for more details.
+        // And there is still a scenario that can not be handled. If we have a very large row, which
+        // have millions of qualifiers, and filter.filterRow is used, then even if we set the flag
+        // here, we still need to scan all the qualifiers before returning...
+        scannerContext.returnImmediately();
+      }
       prevCell = cell;
       scannerContext.setLastPeekedCell(cell);
       topChanged = false;
@@ -601,7 +617,7 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
 
             // Update the progress of the scanner context
             scannerContext.incrementSizeProgress(cellSize,
-              PrivateCellUtil.estimatedHeapSizeOf(cell));
+              PrivateCellUtil.estimatedSizeOfCell(cell));
             scannerContext.incrementBatchProgress(1);
 
             if (matcher.isUserScan() && totalBytesRead > maxRowSize) {
@@ -817,6 +833,12 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
         return false;
       }
     } while ((nextCell = this.heap.peek()) != null && CellUtil.matchingRowColumn(cell, nextCell));
+    // We need this check because it may happen that the new scanner that we get
+    // during heap.next() is requiring reseek due of fake KV previously generated for
+    // ROWCOL bloom filter optimization. See HBASE-19863 for more details
+    if (nextCell != null && matcher.compareKeyForNextColumn(nextCell, cell) < 0) {
+      return false;
+    }
     return true;
   }
 
@@ -975,10 +997,8 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
         heap.peek() == null || bytesRead < preadMaxBytes) {
       return;
     }
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Switch to stream read because we have already read " + bytesRead +
-          " bytes from this scanner");
-    }
+    LOG.debug("Switch to stream read (scanned={} bytes) of {}", bytesRead,
+        this.store.getColumnFamilyName());
     scanUsePread = false;
     Cell lastTop = heap.peek();
     List<KeyValueScanner> memstoreScanners = new ArrayList<>();
@@ -1041,13 +1061,6 @@ public class StoreScanner extends NonReversedNonLazyKeyValueScanner
     return false;
   }
 
-  /**
-   * @see KeyValueScanner#getScannerOrder()
-   */
-  @Override
-  public long getScannerOrder() {
-    return 0;
-  }
 
   /**
    * Seek storefiles in parallel to optimize IO latency as much as possible

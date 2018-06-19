@@ -302,6 +302,7 @@ public abstract class TestVisibilityLabels {
       TEST_UTIL.getHBaseCluster().startRegionServer();
     }
     Thread t1 = new Thread() {
+      @Override
       public void run() {
         List<RegionServerThread> regionServerThreads = TEST_UTIL.getHBaseCluster()
             .getRegionServerThreads();
@@ -320,6 +321,7 @@ public abstract class TestVisibilityLabels {
     t1.start();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     Thread t = new Thread() {
+      @Override
       public void run() {
         try {
           while (!killedRS) {
@@ -363,7 +365,7 @@ public abstract class TestVisibilityLabels {
     }
   }
 
-  @Test(timeout = 60 * 1000)
+  @Test
   public void testVisibilityLabelsOnRSRestart() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     List<RegionServerThread> regionServerThreads = TEST_UTIL.getHBaseCluster()
@@ -375,7 +377,7 @@ public abstract class TestVisibilityLabels {
     RegionServerThread rs = TEST_UTIL.getHBaseCluster().startRegionServer();
     waitForLabelsRegionAvailability(rs.getRegionServer());
     try (Table table = createTableAndWriteDataWithLabels(tableName, "(" + SECRET + "|" + CONFIDENTIAL
-        + ")", PRIVATE);) {
+        + ")", PRIVATE)) {
       Scan s = new Scan();
       s.setAuthorizations(new Authorizations(SECRET));
       ResultScanner scanner = table.getScanner(s);
@@ -415,6 +417,7 @@ public abstract class TestVisibilityLabels {
   public void testSetAndGetUserAuths() throws Throwable {
     final String user = "user1";
     PrivilegedExceptionAction<Void> action = new PrivilegedExceptionAction<Void>() {
+      @Override
       public Void run() throws Exception {
         String[] auths = { SECRET, CONFIDENTIAL };
         try (Connection conn = ConnectionFactory.createConnection(conf)) {
@@ -425,7 +428,7 @@ public abstract class TestVisibilityLabels {
       }
     };
     SUPERUSER.runAs(action);
-    try (Table ht = TEST_UTIL.getConnection().getTable(LABELS_TABLE_NAME);) {
+    try (Table ht = TEST_UTIL.getConnection().getTable(LABELS_TABLE_NAME)) {
       Scan scan = new Scan();
       scan.setAuthorizations(new Authorizations(VisibilityUtils.SYSTEM_LABEL));
       ResultScanner scanner = ht.getScanner(scan);
@@ -441,6 +444,7 @@ public abstract class TestVisibilityLabels {
     }
 
     action = new PrivilegedExceptionAction<Void>() {
+      @Override
       public Void run() throws Exception {
         GetAuthsResponse authsResponse = null;
         try (Connection conn = ConnectionFactory.createConnection(conf)) {
@@ -462,6 +466,7 @@ public abstract class TestVisibilityLabels {
 
     // Try doing setAuths once again and there should not be any duplicates
     action = new PrivilegedExceptionAction<Void>() {
+      @Override
       public Void run() throws Exception {
         String[] auths1 = { SECRET, CONFIDENTIAL };
         GetAuthsResponse authsResponse = null;
@@ -491,7 +496,7 @@ public abstract class TestVisibilityLabels {
     List<String> auths = new ArrayList<>();
     for (Result result : results) {
       Cell labelCell = result.getColumnLatestCell(LABELS_TABLE_FAMILY, LABEL_QUALIFIER);
-      Cell userAuthCell = result.getColumnLatestCell(LABELS_TABLE_FAMILY, user.getBytes());
+      Cell userAuthCell = result.getColumnLatestCell(LABELS_TABLE_FAMILY, Bytes.toBytes(user));
       if (userAuthCell != null) {
         auths.add(Bytes.toString(labelCell.getValueArray(), labelCell.getValueOffset(),
             labelCell.getValueLength()));
@@ -503,6 +508,7 @@ public abstract class TestVisibilityLabels {
   @Test
   public void testClearUserAuths() throws Throwable {
     PrivilegedExceptionAction<Void> action = new PrivilegedExceptionAction<Void>() {
+      @Override
       public Void run() throws Exception {
         String[] auths = { SECRET, CONFIDENTIAL, PRIVATE };
         String user = "testUser";
@@ -616,7 +622,7 @@ public abstract class TestVisibilityLabels {
   @Test
   public void testLabelsWithAppend() throws Throwable {
     TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    try (Table table = TEST_UTIL.createTable(tableName, fam);) {
+    try (Table table = TEST_UTIL.createTable(tableName, fam)) {
       byte[] row1 = Bytes.toBytes("row1");
       byte[] val = Bytes.toBytes("a");
       Put put = new Put(row1);
@@ -700,32 +706,32 @@ public abstract class TestVisibilityLabels {
     TEST_UTIL.getAdmin().createTable(desc);
     try (Table table = TEST_UTIL.getConnection().getTable(tableName)) {
       Put put = new Put(r1);
-      put.addColumn(fam, qual, 3l, v1);
-      put.addColumn(fam, qual2, 3l, v1);
-      put.addColumn(fam2, qual, 3l, v1);
-      put.addColumn(fam2, qual2, 3l, v1);
+      put.addColumn(fam, qual, 3L, v1);
+      put.addColumn(fam, qual2, 3L, v1);
+      put.addColumn(fam2, qual, 3L, v1);
+      put.addColumn(fam2, qual2, 3L, v1);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
       put = new Put(r1);
-      put.addColumn(fam, qual, 4l, v2);
-      put.addColumn(fam, qual2, 4l, v2);
-      put.addColumn(fam2, qual, 4l, v2);
-      put.addColumn(fam2, qual2, 4l, v2);
+      put.addColumn(fam, qual, 4L, v2);
+      put.addColumn(fam, qual2, 4L, v2);
+      put.addColumn(fam2, qual, 4L, v2);
+      put.addColumn(fam2, qual2, 4L, v2);
       put.setCellVisibility(new CellVisibility(PRIVATE));
       table.put(put);
 
       put = new Put(r2);
-      put.addColumn(fam, qual, 3l, v1);
-      put.addColumn(fam, qual2, 3l, v1);
-      put.addColumn(fam2, qual, 3l, v1);
-      put.addColumn(fam2, qual2, 3l, v1);
+      put.addColumn(fam, qual, 3L, v1);
+      put.addColumn(fam, qual2, 3L, v1);
+      put.addColumn(fam2, qual, 3L, v1);
+      put.addColumn(fam2, qual2, 3L, v1);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
       put = new Put(r2);
-      put.addColumn(fam, qual, 4l, v2);
-      put.addColumn(fam, qual2, 4l, v2);
-      put.addColumn(fam2, qual, 4l, v2);
-      put.addColumn(fam2, qual2, 4l, v2);
+      put.addColumn(fam, qual, 4L, v2);
+      put.addColumn(fam, qual2, 4L, v2);
+      put.addColumn(fam2, qual, 4L, v2);
+      put.addColumn(fam2, qual2, 4L, v2);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
 
@@ -860,6 +866,7 @@ public abstract class TestVisibilityLabels {
   public static void addLabels() throws Exception {
     PrivilegedExceptionAction<VisibilityLabelsResponse> action =
         new PrivilegedExceptionAction<VisibilityLabelsResponse>() {
+      @Override
       public VisibilityLabelsResponse run() throws Exception {
         String[] labels = { SECRET, TOPSECRET, CONFIDENTIAL, PUBLIC, PRIVATE, COPYRIGHT, ACCENT,
             UNICODE_VIS_TAG, UC1, UC2 };

@@ -1,5 +1,4 @@
-/*
- *
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -47,9 +46,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
@@ -89,13 +85,16 @@ import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.MapUtils;
 
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.WALEntry;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutationProto.MutationType;
@@ -116,7 +115,7 @@ public class WALSplitter {
   public static final boolean SPLIT_SKIP_ERRORS_DEFAULT = false;
 
   // Parameters for split process
-  protected final Path rootDir;
+  protected final Path walDir;
   protected final FileSystem fs;
   protected final Configuration conf;
 
@@ -149,14 +148,14 @@ public class WALSplitter {
 
 
   @VisibleForTesting
-  WALSplitter(final WALFactory factory, Configuration conf, Path rootDir,
+  WALSplitter(final WALFactory factory, Configuration conf, Path walDir,
       FileSystem fs, LastSequenceId idChecker,
       SplitLogWorkerCoordination splitLogWorkerCoordination) {
     this.conf = HBaseConfiguration.create(conf);
     String codecClassName = conf
         .get(WALCellCodec.WAL_CELL_CODEC_CLASS_KEY, WALCellCodec.class.getName());
     this.conf.set(HConstants.RPC_CODEC_CONF_KEY, codecClassName);
-    this.rootDir = rootDir;
+    this.walDir = walDir;
     this.fs = fs;
     this.sequenceIdChecker = idChecker;
     this.splitLogWorkerCoordination = splitLogWorkerCoordination;
@@ -187,11 +186,11 @@ public class WALSplitter {
    * <p>
    * @return false if it is interrupted by the progress-able.
    */
-  public static boolean splitLogFile(Path rootDir, FileStatus logfile, FileSystem fs,
+  public static boolean splitLogFile(Path walDir, FileStatus logfile, FileSystem fs,
       Configuration conf, CancelableProgressable reporter, LastSequenceId idChecker,
       SplitLogWorkerCoordination splitLogWorkerCoordination, final WALFactory factory)
       throws IOException {
-    WALSplitter s = new WALSplitter(factory, conf, rootDir, fs, idChecker,
+    WALSplitter s = new WALSplitter(factory, conf, walDir, fs, idChecker,
         splitLogWorkerCoordination);
     return s.splitLogFile(logfile, reporter);
   }
@@ -323,10 +322,10 @@ public class WALSplitter {
       LOG.warn("Could not parse, corrupted WAL={}", logPath, e);
       if (splitLogWorkerCoordination != null) {
         // Some tests pass in a csm of null.
-        splitLogWorkerCoordination.markCorrupted(rootDir, logfile.getPath().getName(), fs);
+        splitLogWorkerCoordination.markCorrupted(walDir, logfile.getPath().getName(), fs);
       } else {
         // for tests only
-        ZKSplitLog.markCorrupted(rootDir, logfile.getPath().getName(), fs);
+        ZKSplitLog.markCorrupted(walDir, logfile.getPath().getName(), fs);
       }
       isCorrupted = true;
     } catch (IOException e) {
@@ -458,19 +457,20 @@ public class WALSplitter {
    * <code>logEntry</code>: e.g. /hbase/some_table/2323432434/recovered.edits/2332.
    * This method also ensures existence of RECOVERED_EDITS_DIR under the region
    * creating it if necessary.
-   * @param fs
    * @param logEntry
-   * @param rootDir HBase root dir.
    * @param fileNameBeingSplit the file being split currently. Used to generate tmp file name.
+   * @param conf
    * @return Path to file into which to dump split log edits.
    * @throws IOException
    */
   @SuppressWarnings("deprecation")
   @VisibleForTesting
-  static Path getRegionSplitEditsPath(final FileSystem fs,
-      final Entry logEntry, final Path rootDir, String fileNameBeingSplit)
+  static Path getRegionSplitEditsPath(final Entry logEntry, String fileNameBeingSplit,
+      Configuration conf)
   throws IOException {
-    Path tableDir = FSUtils.getTableDir(rootDir, logEntry.getKey().getTablename());
+    FileSystem fs = FileSystem.get(conf);
+    Path rootDir = FSUtils.getRootDir(conf);
+    Path tableDir = FSUtils.getTableDir(rootDir, logEntry.getKey().getTableName());
     String encodedRegionName = Bytes.toString(logEntry.getKey().getEncodedRegionName());
     Path regiondir = HRegion.getRegionDir(tableDir, encodedRegionName);
     Path dir = getRegionDirRecoveredEditsDir(regiondir);
@@ -623,70 +623,70 @@ public class WALSplitter {
         || file.getName().endsWith(OLD_SEQUENCE_ID_FILE_SUFFIX);
   }
 
-  /**
-   * Create a file with name as region open sequence id
-   * @param fs
-   * @param regiondir
-   * @param newSeqId
-   * @param safetyBumper
-   * @return long new sequence Id value
-   * @throws IOException
-   */
-  public static long writeRegionSequenceIdFile(final FileSystem fs, final Path regiondir,
-      long newSeqId, long safetyBumper) throws IOException {
+  private static FileStatus[] getSequenceIdFiles(FileSystem fs, Path regionDir) throws IOException {
     // TODO: Why are we using a method in here as part of our normal region open where
     // there is no splitting involved? Fix. St.Ack 01/20/2017.
-    Path editsdir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
-    long maxSeqId = 0;
-    FileStatus[] files = null;
-    if (fs.exists(editsdir)) {
-      files = FSUtils.listStatus(fs, editsdir, new PathFilter() {
-        @Override
-        public boolean accept(Path p) {
-          return isSequenceIdFile(p);
-        }
-      });
-      if (files != null) {
-        for (FileStatus status : files) {
-          String fileName = status.getPath().getName();
-          try {
-            long tmpSeqId =
-                Long.parseLong(fileName.substring(0, fileName.length()
-                - SEQUENCE_ID_FILE_SUFFIX_LENGTH));
-            maxSeqId = Math.max(tmpSeqId, maxSeqId);
-          } catch (NumberFormatException ex) {
-            LOG.warn("Invalid SeqId File Name={}", fileName);
-          }
-        }
+    Path editsDir = WALSplitter.getRegionDirRecoveredEditsDir(regionDir);
+    try {
+      FileStatus[] files = fs.listStatus(editsDir, WALSplitter::isSequenceIdFile);
+      return files != null ? files : new FileStatus[0];
+    } catch (FileNotFoundException e) {
+      return new FileStatus[0];
+    }
+  }
+
+  private static long getMaxSequenceId(FileStatus[] files) {
+    long maxSeqId = -1L;
+    for (FileStatus file : files) {
+      String fileName = file.getPath().getName();
+      try {
+        maxSeqId = Math.max(maxSeqId, Long
+          .parseLong(fileName.substring(0, fileName.length() - SEQUENCE_ID_FILE_SUFFIX_LENGTH)));
+      } catch (NumberFormatException ex) {
+        LOG.warn("Invalid SeqId File Name={}", fileName);
       }
     }
-    if (maxSeqId > newSeqId) {
-      newSeqId = maxSeqId;
-    }
-    newSeqId += safetyBumper; // bump up SeqId
+    return maxSeqId;
+  }
 
+  /**
+   * Get the max sequence id which is stored in the region directory. -1 if none.
+   */
+  public static long getMaxRegionSequenceId(FileSystem fs, Path regionDir) throws IOException {
+    return getMaxSequenceId(getSequenceIdFiles(fs, regionDir));
+  }
+
+  /**
+   * Create a file with name as region's max sequence id
+   */
+  public static void writeRegionSequenceIdFile(FileSystem fs, Path regionDir, long newMaxSeqId)
+      throws IOException {
+    FileStatus[] files = getSequenceIdFiles(fs, regionDir);
+    long maxSeqId = getMaxSequenceId(files);
+    if (maxSeqId > newMaxSeqId) {
+      throw new IOException("The new max sequence id " + newMaxSeqId +
+        " is less than the old max sequence id " + maxSeqId);
+    }
     // write a new seqId file
-    Path newSeqIdFile = new Path(editsdir, newSeqId + SEQUENCE_ID_FILE_SUFFIX);
-    if (newSeqId != maxSeqId) {
+    Path newSeqIdFile = new Path(WALSplitter.getRegionDirRecoveredEditsDir(regionDir),
+      newMaxSeqId + SEQUENCE_ID_FILE_SUFFIX);
+    if (newMaxSeqId != maxSeqId) {
       try {
         if (!fs.createNewFile(newSeqIdFile) && !fs.exists(newSeqIdFile)) {
           throw new IOException("Failed to create SeqId file:" + newSeqIdFile);
         }
-        LOG.debug("Wrote file={}, newSeqId={}, maxSeqId={}", newSeqIdFile,
-            newSeqId, maxSeqId);
+        LOG.debug("Wrote file={}, newMaxSeqId={}, maxSeqId={}", newSeqIdFile, newMaxSeqId,
+          maxSeqId);
       } catch (FileAlreadyExistsException ignored) {
         // latest hdfs throws this exception. it's all right if newSeqIdFile already exists
       }
     }
     // remove old ones
-    if (files != null) {
-      for (FileStatus status : files) {
-        if (!newSeqIdFile.equals(status.getPath())) {
-          fs.delete(status.getPath(), false);
-        }
+    for (FileStatus status : files) {
+      if (!newSeqIdFile.equals(status.getPath())) {
+        fs.delete(status.getPath(), false);
       }
     }
-    return newSeqId;
   }
 
   /**
@@ -877,7 +877,7 @@ public class WALSplitter {
       synchronized (this) {
         buffer = buffers.get(key.getEncodedRegionName());
         if (buffer == null) {
-          buffer = new RegionEntryBuffer(key.getTablename(), key.getEncodedRegionName());
+          buffer = new RegionEntryBuffer(key.getTableName(), key.getEncodedRegionName());
           buffers.put(key.getEncodedRegionName(), buffer);
         }
         incrHeap= buffer.appendEntry(entry);
@@ -1085,7 +1085,7 @@ public class WALSplitter {
     protected EntryBuffers entryBuffers;
 
     protected ConcurrentHashMap<String, SinkWriter> writers = new ConcurrentHashMap<>();
-    protected ConcurrentHashMap<String, Long> regionMaximumEditLogSeqNum =
+    protected final ConcurrentHashMap<String, Long> regionMaximumEditLogSeqNum =
         new ConcurrentHashMap<>();
 
 
@@ -1261,7 +1261,8 @@ public class WALSplitter {
     }
 
     // delete the one with fewer wal entries
-    private void deleteOneWithFewerEntries(WriterAndPath wap, Path dst) throws IOException {
+    private void deleteOneWithFewerEntries(FileSystem rootFs, WriterAndPath wap, Path dst)
+        throws IOException {
       long dstMinLogSeqNum = -1L;
       try (WAL.Reader reader = walFactory.createReader(fs, dst)) {
         WAL.Entry entry = reader.next();
@@ -1282,8 +1283,8 @@ public class WALSplitter {
         }
       } else {
         LOG.warn("Found existing old edits file and we have less entries. Deleting " + wap.p
-            + ", length=" + fs.getFileStatus(wap.p).getLen());
-        if (!fs.delete(wap.p, false)) {
+            + ", length=" + rootFs.getFileStatus(wap.p).getLen());
+        if (!rootFs.delete(wap.p, false)) {
           LOG.warn("Failed deleting of {}", wap.p);
           throw new IOException("Failed deleting of " + wap.p);
         }
@@ -1368,6 +1369,7 @@ public class WALSplitter {
     Path closeWriter(String encodedRegionName, WriterAndPath wap,
         List<IOException> thrown) throws IOException{
       LOG.trace("Closing {}", wap.p);
+      FileSystem rootFs = FileSystem.get(conf);
       try {
         wap.w.close();
       } catch (IOException ioe) {
@@ -1382,7 +1384,7 @@ public class WALSplitter {
       }
       if (wap.editsWritten == 0) {
         // just remove the empty recovered.edits file
-        if (fs.exists(wap.p) && !fs.delete(wap.p, false)) {
+        if (rootFs.exists(wap.p) && !rootFs.delete(wap.p, false)) {
           LOG.warn("Failed deleting empty {}", wap.p);
           throw new IOException("Failed deleting empty  " + wap.p);
         }
@@ -1392,14 +1394,14 @@ public class WALSplitter {
       Path dst = getCompletedRecoveredEditsFilePath(wap.p,
           regionMaximumEditLogSeqNum.get(encodedRegionName));
       try {
-        if (!dst.equals(wap.p) && fs.exists(dst)) {
-          deleteOneWithFewerEntries(wap, dst);
+        if (!dst.equals(wap.p) && rootFs.exists(dst)) {
+          deleteOneWithFewerEntries(rootFs, wap, dst);
         }
         // Skip the unit tests which create a splitter that reads and
         // writes the data without touching disk.
         // TestHLogSplit#testThreading is an example.
-        if (fs.exists(wap.p)) {
-          if (!fs.rename(wap.p, dst)) {
+        if (rootFs.exists(wap.p)) {
+          if (!rootFs.rename(wap.p, dst)) {
             throw new IOException("Failed renaming " + wap.p + " to " + dst);
           }
           LOG.info("Rename {} to {}", wap.p, dst);
@@ -1471,7 +1473,7 @@ public class WALSplitter {
       if (blacklistedRegions.contains(region)) {
         return null;
       }
-      ret = createWAP(region, entry, rootDir);
+      ret = createWAP(region, entry);
       if (ret == null) {
         blacklistedRegions.add(region);
         return null;
@@ -1485,16 +1487,18 @@ public class WALSplitter {
     /**
      * @return a path with a write for that path. caller should close.
      */
-    WriterAndPath createWAP(byte[] region, Entry entry, Path rootdir) throws IOException {
-      Path regionedits = getRegionSplitEditsPath(fs, entry, rootdir, fileBeingSplit.getPath().getName());
+    WriterAndPath createWAP(byte[] region, Entry entry) throws IOException {
+      Path regionedits = getRegionSplitEditsPath(entry,
+          fileBeingSplit.getPath().getName(), conf);
       if (regionedits == null) {
         return null;
       }
-      if (fs.exists(regionedits)) {
+      FileSystem rootFs = FileSystem.get(conf);
+      if (rootFs.exists(regionedits)) {
         LOG.warn("Found old edits file. It could be the "
             + "result of a previous failed split attempt. Deleting " + regionedits + ", length="
-            + fs.getFileStatus(regionedits).getLen());
-        if (!fs.delete(regionedits, false)) {
+            + rootFs.getFileStatus(regionedits).getLen());
+        if (!rootFs.delete(regionedits, false)) {
           LOG.warn("Failed delete of old {}", regionedits);
         }
       }
@@ -1642,8 +1646,10 @@ public class WALSplitter {
         List<IOException> thrown, List<Path> paths)
         throws InterruptedException, ExecutionException {
       for (final Map.Entry<byte[], RegionEntryBuffer> buffer : entryBuffers.buffers.entrySet()) {
-        LOG.info("Submitting writeThenClose of {}", buffer.getValue().encodedRegionName);
+        LOG.info("Submitting writeThenClose of {}",
+            Arrays.toString(buffer.getValue().encodedRegionName));
         completionService.submit(new Callable<Void>() {
+          @Override
           public Void call() throws Exception {
             Path dst = writeThenClose(buffer.getValue());
             paths.add(dst);
@@ -1815,9 +1821,7 @@ public class WALSplitter {
    * @throws IOException
    */
   public static List<MutationReplay> getMutationsFromWALEntry(WALEntry entry, CellScanner cells,
-      Pair<WALKey, WALEdit> logEntry, Durability durability)
-          throws IOException {
-
+      Pair<WALKey, WALEdit> logEntry, Durability durability) throws IOException {
     if (entry == null) {
       // return an empty array
       return Collections.emptyList();

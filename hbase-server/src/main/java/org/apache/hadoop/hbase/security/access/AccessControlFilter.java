@@ -55,7 +55,7 @@ class AccessControlFilter extends FilterBase {
     CHECK_TABLE_AND_CF_ONLY,
     /** Cell permissions can override table or CF permissions */
     CHECK_CELL_DEFAULT,
-  };
+  }
 
   private TableAuthManager authManager;
   private TableName table;
@@ -154,6 +154,7 @@ class AccessControlFilter extends FilterBase {
   /**
    * @return The filter serialized using pb
    */
+  @Override
   public byte [] toByteArray() {
     // no implementation, server-side use only
     throw new UnsupportedOperationException(
@@ -164,7 +165,7 @@ class AccessControlFilter extends FilterBase {
    * @param pbBytes A pb serialized {@link AccessControlFilter} instance
    * @return An instance of {@link AccessControlFilter} made from <code>bytes</code>
    * @throws org.apache.hadoop.hbase.exceptions.DeserializationException
-   * @see {@link #toByteArray()}
+   * @see #toByteArray()
    */
   public static AccessControlFilter parseFrom(final byte [] pbBytes)
   throws DeserializationException {

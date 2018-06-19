@@ -37,37 +37,48 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
-
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.ClockOutOfSyncException;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.NotServingRegionException;
-import org.apache.hadoop.hbase.RegionLoad;
-import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.RegionMetrics;
+import org.apache.hadoop.hbase.ScheduledChore;
+import org.apache.hadoop.hbase.ServerMetrics;
 import org.apache.hadoop.hbase.ServerMetricsBuilder;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.YouAreDeadException;
-import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RetriesExhaustedException;
 import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.protobuf.ByteString;
 import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.FlushedRegionSequenceId;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.FlushedSequenceId;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.FlushedStoreSequenceId;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
 
 /**
@@ -92,9 +103,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProto
  * A server is fully processed only after the handler is fully enabled
  * and has completed the handling.
  */
-/**
- *
- */
 @InterfaceAudience.Private
 public class ServerManager {
   public static final String WAIT_ON_REGIONSERVERS_MAXTOSTART =
@@ -109,6 +117,22 @@ public class ServerManager {
   public static final String WAIT_ON_REGIONSERVERS_INTERVAL =
       "hbase.master.wait.on.regionservers.interval";
 
+  /**
+   * see HBASE-20727
+   * if set to true, flushedSequenceIdByRegion and storeFlushedSequenceIdsByRegion
+   * will be persisted to HDFS and loaded when master restart to speed up log split
+   */
+  public static final String PERSIST_FLUSHEDSEQUENCEID =
+      "hbase.master.persist.flushedsequenceid.enabled";
+
+  public static final boolean PERSIST_FLUSHEDSEQUENCEID_DEFAULT = true;
+
+  public static final String FLUSHEDSEQUENCEID_FLUSHER_INTERVAL =
+      "hbase.master.flushedsequenceid.flusher.interval";
+
+  public static final int FLUSHEDSEQUENCEID_FLUSHER_INTERVAL_DEFAULT =
+      3 * 60 * 60 * 1000; // 3 hours
+
   private static final Logger LOG = LoggerFactory.getLogger(ServerManager.class);
 
   // Set if we are to shutdown the cluster.
@@ -120,6 +144,13 @@ public class ServerManager {
   private final ConcurrentNavigableMap<byte[], Long> flushedSequenceIdByRegion =
     new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR);
 
+  private boolean persistFlushedSequenceId = true;
+  private volatile boolean isFlushSeqIdPersistInProgress = false;
+  /** File on hdfs to store last flushed sequence id of regions */
+  private static final String LAST_FLUSHED_SEQ_ID_FILE = ".lastflushedseqids";
+  private  FlushedSequenceIdFlusher flushedSeqIdFlusher;
+
+
   /**
    * The last flushed sequence id for a store in a region.
    */
@@ -127,7 +158,8 @@ public class ServerManager {
     storeFlushedSequenceIdsByRegion = new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR);
 
   /** Map of registered servers to their current load */
-  private final ConcurrentNavigableMap<ServerName, ServerLoad> onlineServers = new ConcurrentSkipListMap<>();
+  private final ConcurrentNavigableMap<ServerName, ServerMetrics> onlineServers =
+    new ConcurrentSkipListMap<>();
 
   /**
    * Map of admin interfaces per registered regionserver; these interfaces we use to control
@@ -188,22 +220,16 @@ public class ServerManager {
 
   /**
    * Constructor.
-   * @param master
-   * @throws ZooKeeperConnectionException
    */
   public ServerManager(final MasterServices master) {
-    this(master, true);
-  }
-
-  ServerManager(final MasterServices master, final boolean connect) {
     this.master = master;
     Configuration c = master.getConfiguration();
     maxSkew = c.getLong("hbase.master.maxclockskew", 30000);
     warningSkew = c.getLong("hbase.master.warningclockskew", 10000);
-    this.connection = connect ? master.getClusterConnection() : null;
-    this.rpcControllerFactory = this.connection == null
-        ? null
-        : connection.getRpcControllerFactory();
+    this.connection = master.getClusterConnection();
+    this.rpcControllerFactory = this.connection == null? null: connection.getRpcControllerFactory();
+    persistFlushedSequenceId = c.getBoolean(PERSIST_FLUSHEDSEQUENCEID,
+        PERSIST_FLUSHEDSEQUENCEID_DEFAULT);
   }
 
   /**
@@ -225,12 +251,13 @@ public class ServerManager {
   /**
    * Let the server manager know a new regionserver has come online
    * @param request the startup request
+   * @param versionNumber the version of the new regionserver
    * @param ia the InetAddress from which request is received
    * @return The ServerName we know this server as.
    * @throws IOException
    */
-  ServerName regionServerStartup(RegionServerStartupRequest request, InetAddress ia)
-      throws IOException {
+  ServerName regionServerStartup(RegionServerStartupRequest request, int versionNumber,
+      InetAddress ia) throws IOException {
     // Test for case where we get a region startup message from a regionserver
     // that has been quickly restarted but whose znode expiration handler has
     // not yet run, or from a server whose fail we are currently processing.
@@ -245,7 +272,7 @@ public class ServerManager {
       request.getServerStartCode());
     checkClockSkew(sn, request.getServerCurrentTime());
     checkIsDead(sn, "STARTUP");
-    if (!checkAndRecordNewServer(sn, new ServerLoad(ServerMetricsBuilder.of(sn)))) {
+    if (!checkAndRecordNewServer(sn, ServerMetricsBuilder.of(sn, versionNumber))) {
       LOG.warn("THIS SHOULD NOT HAPPEN, RegionServerStartup"
         + " could not record the server: " + sn);
     }
@@ -257,12 +284,11 @@ public class ServerManager {
    * @param sn
    * @param hsl
    */
-  private void updateLastFlushedSequenceIds(ServerName sn, ServerLoad hsl) {
-    Map<byte[], RegionLoad> regionsLoad = hsl.getRegionsLoad();
-    for (Entry<byte[], RegionLoad> entry : regionsLoad.entrySet()) {
+  private void updateLastFlushedSequenceIds(ServerName sn, ServerMetrics hsl) {
+    for (Entry<byte[], RegionMetrics> entry : hsl.getRegionMetrics().entrySet()) {
       byte[] encodedRegionName = Bytes.toBytes(RegionInfo.encodeRegionName(entry.getKey()));
       Long existingValue = flushedSequenceIdByRegion.get(encodedRegionName);
-      long l = entry.getValue().getCompleteSequenceId();
+      long l = entry.getValue().getCompletedSequenceId();
       // Don't let smaller sequence ids override greater sequence ids.
       if (LOG.isTraceEnabled()) {
         LOG.trace(Bytes.toString(encodedRegionName) + ", existingValue=" + existingValue +
@@ -278,10 +304,10 @@ public class ServerManager {
       ConcurrentNavigableMap<byte[], Long> storeFlushedSequenceId =
           computeIfAbsent(storeFlushedSequenceIdsByRegion, encodedRegionName,
             () -> new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR));
-      for (StoreSequenceId storeSeqId : entry.getValue().getStoreCompleteSequenceId()) {
-        byte[] family = storeSeqId.getFamilyName().toByteArray();
+      for (Entry<byte[], Long> storeSeqId : entry.getValue().getStoreSequenceId().entrySet()) {
+        byte[] family = storeSeqId.getKey();
         existingValue = storeFlushedSequenceId.get(family);
-        l = storeSeqId.getSequenceId();
+        l = storeSeqId.getValue();
         if (LOG.isTraceEnabled()) {
           LOG.trace(Bytes.toString(encodedRegionName) + ", family=" + Bytes.toString(family) +
             ", existingValue=" + existingValue + ", completeSequenceId=" + l);
@@ -296,7 +322,7 @@ public class ServerManager {
 
   @VisibleForTesting
   public void regionServerReport(ServerName sn,
-      ServerLoad sl) throws YouAreDeadException {
+    ServerMetrics sl) throws YouAreDeadException {
     checkIsDead(sn, "REPORT");
     if (null == this.onlineServers.replace(sn, sl)) {
       // Already have this host+port combo and its just different start code?
@@ -321,7 +347,7 @@ public class ServerManager {
    * @param sl the server load on the server
    * @return true if the server is recorded, otherwise, false
    */
-  boolean checkAndRecordNewServer(final ServerName serverName, final ServerLoad sl) {
+  boolean checkAndRecordNewServer(final ServerName serverName, final ServerMetrics sl) {
     ServerName existingServer = null;
     synchronized (this.onlineServers) {
       existingServer = findServerWithSameHostnamePortWithLock(serverName);
@@ -428,10 +454,15 @@ public class ServerManager {
    * @param serverName The remote servers name.
    */
   @VisibleForTesting
-  void recordNewServerWithLock(final ServerName serverName, final ServerLoad sl) {
-    LOG.info("Registering server=" + serverName);
+  void recordNewServerWithLock(final ServerName serverName, final ServerMetrics sl) {
+    LOG.info("Registering regionserver=" + serverName);
     this.onlineServers.put(serverName, sl);
     this.rsAdmins.remove(serverName);
+  }
+
+  @VisibleForTesting
+  public ConcurrentNavigableMap<byte[], Long> getFlushedSequenceIdByRegion() {
+    return flushedSequenceIdByRegion;
   }
 
   public RegionStoreSequenceIds getLastFlushedSequenceId(byte[] encodedRegionName) {
@@ -452,9 +483,9 @@ public class ServerManager {
 
   /**
    * @param serverName
-   * @return ServerLoad if serverName is known else null
+   * @return ServerMetrics if serverName is known else null
    */
-  public ServerLoad getLoad(final ServerName serverName) {
+  public ServerMetrics getLoad(final ServerName serverName) {
     return this.onlineServers.get(serverName);
   }
 
@@ -467,9 +498,9 @@ public class ServerManager {
   public double getAverageLoad() {
     int totalLoad = 0;
     int numServers = 0;
-    for (ServerLoad sl: this.onlineServers.values()) {
-        numServers++;
-        totalLoad += sl.getNumberOfRegions();
+    for (ServerMetrics sl : this.onlineServers.values()) {
+      numServers++;
+      totalLoad += sl.getRegionMetrics().size();
     }
     return numServers == 0 ? 0 :
       (double)totalLoad / (double)numServers;
@@ -484,7 +515,7 @@ public class ServerManager {
   /**
    * @return Read-only map of servers to serverinfo
    */
-  public Map<ServerName, ServerLoad> getOnlineServers() {
+  public Map<ServerName, ServerMetrics> getOnlineServers() {
     // Presumption is that iterating the returned Map is OK.
     synchronized (this.onlineServers) {
       return Collections.unmodifiableMap(this.onlineServers);
@@ -526,7 +557,7 @@ public class ServerManager {
           }
           sb.append(key);
         }
-        LOG.info("Waiting on regionserver(s) to go down " + sb.toString());
+        LOG.info("Waiting on regionserver(s) " + sb.toString());
         previousLogTime = System.currentTimeMillis();
       }
 
@@ -555,47 +586,52 @@ public class ServerManager {
 
   private List<String> getRegionServersInZK(final ZKWatcher zkw)
   throws KeeperException {
-    return ZKUtil.listChildrenNoWatch(zkw, zkw.znodePaths.rsZNode);
+    return ZKUtil.listChildrenNoWatch(zkw, zkw.getZNodePaths().rsZNode);
   }
 
   /*
    * Expire the passed server.  Add it to list of dead servers and queue a
    * shutdown processing.
+   * @return True if we queued a ServerCrashProcedure else false if we did not (could happen
+   * for many reasons including the fact that its this server that is going down or we already
+   * have queued an SCP for this server or SCP processing is currently disabled because we are
+   * in startup phase).
    */
-  public synchronized void expireServer(final ServerName serverName) {
+  public synchronized boolean expireServer(final ServerName serverName) {
+    // THIS server is going down... can't handle our own expiration.
     if (serverName.equals(master.getServerName())) {
       if (!(master.isAborted() || master.isStopped())) {
         master.stop("We lost our znode?");
       }
-      return;
+      return false;
     }
+    // No SCP handling during startup.
     if (!master.isServerCrashProcessingEnabled()) {
       LOG.info("Master doesn't enable ServerShutdownHandler during initialization, "
           + "delay expiring server " + serverName);
-      // Even we delay expire this server, we still need to handle Meta's RIT
+      // Even though we delay expire of this server, we still need to handle Meta's RIT
       // that are against the crashed server; since when we do RecoverMetaProcedure,
-      // the SCP is not enable yet and Meta's RIT may be suspend forever. See HBase-19287
+      // the SCP is not enabled yet and Meta's RIT may be suspend forever. See HBase-19287
       master.getAssignmentManager().handleMetaRITOnCrashedServer(serverName);
       this.queuedDeadServers.add(serverName);
-      return;
+      // Return true because though on SCP queued, there will be one queued later.
+      return true;
     }
     if (this.deadservers.isDeadServer(serverName)) {
-      // TODO: Can this happen?  It shouldn't be online in this case?
-      LOG.warn("Expiration of " + serverName +
-          " but server shutdown already in progress");
-      return;
+      LOG.warn("Expiration called on {} but crash processing already in progress", serverName);
+      return false;
     }
     moveFromOnlineToDeadServers(serverName);
 
     // If cluster is going down, yes, servers are going to be expiring; don't
     // process as a dead server
-    if (this.clusterShutdown.get()) {
+    if (isClusterShutdown()) {
       LOG.info("Cluster shutdown set; " + serverName +
         " expired; onlineServers=" + this.onlineServers.size());
       if (this.onlineServers.isEmpty()) {
         master.stop("Cluster shutdown set; onlineServer=0");
       }
-      return;
+      return false;
     }
     LOG.info("Processing expiration of " + serverName + " on " + this.master.getServerName());
     master.getAssignmentManager().submitServerCrash(serverName, true);
@@ -606,6 +642,11 @@ public class ServerManager {
         listener.serverRemoved(serverName);
       }
     }
+    // trigger a persist of flushedSeqId
+    if (flushedSeqIdFlusher != null) {
+      flushedSeqIdFlusher.triggerNow();
+    }
+    return true;
   }
 
   @VisibleForTesting
@@ -865,7 +906,7 @@ public class ServerManager {
       if (oldCount != count || lastLogTime + interval < now) {
         lastLogTime = now;
         String msg =
-            "Waiting on RegionServer count=" + count + " to settle; waited="+
+            "Waiting on regionserver count=" + count + "; waited="+
                 slept + "ms, expecting min=" + minToStart + " server(s), max="+ getStrForMax(maxToStart) +
                 " server(s), " + "timeout=" + timeout + "ms, lastChange=" + (lastCountChange - now) + "ms";
         LOG.info(msg);
@@ -888,7 +929,7 @@ public class ServerManager {
     if (isClusterShutdown()) {
       this.master.stop("Cluster shutdown");
     }
-    LOG.info("Finished wait on RegionServer count=" + count + "; waited=" + slept + "ms," +
+    LOG.info("Finished waiting on RegionServer count=" + count + "; waited=" + slept + "ms," +
         " expected min=" + minToStart + " server(s), max=" +  getStrForMax(maxToStart) + " server(s),"+
         " master is "+ (this.master.isStopped() ? "stopped.": "running"));
   }
@@ -912,11 +953,11 @@ public class ServerManager {
    * @return A copy of the internal list of online servers matched by the predicator
    */
   public List<ServerName> getOnlineServersListWithPredicator(List<ServerName> keys,
-    Predicate<ServerLoad> idleServerPredicator) {
+    Predicate<ServerMetrics> idleServerPredicator) {
     List<ServerName> names = new ArrayList<>();
     if (keys != null && idleServerPredicator != null) {
       keys.forEach(name -> {
-        ServerLoad load = onlineServers.get(name);
+        ServerMetrics load = onlineServers.get(name);
         if (load != null) {
           if (idleServerPredicator.test(load)) {
             names.add(name);
@@ -961,21 +1002,45 @@ public class ServerManager {
     String statusStr = "Cluster shutdown requested of master=" + this.master.getServerName();
     LOG.info(statusStr);
     this.clusterShutdown.set(true);
+    if (onlineServers.isEmpty()) {
+      // we do not synchronize here so this may cause a double stop, but not a big deal
+      master.stop("OnlineServer=0 right after cluster shutdown set");
+    }
   }
 
-  public boolean isClusterShutdown() {
+  boolean isClusterShutdown() {
     return this.clusterShutdown.get();
   }
 
   /**
-   * Stop the ServerManager.  Currently closes the connection to the master.
+   * start chore in ServerManager
+   */
+  public void startChore() {
+    Configuration c = master.getConfiguration();
+    if (persistFlushedSequenceId) {
+      // when reach here, RegionStates should loaded, firstly, we call remove deleted regions
+      removeDeletedRegionFromLoadedFlushedSequenceIds();
+      int flushPeriod = c.getInt(FLUSHEDSEQUENCEID_FLUSHER_INTERVAL,
+          FLUSHEDSEQUENCEID_FLUSHER_INTERVAL_DEFAULT);
+      flushedSeqIdFlusher = new FlushedSequenceIdFlusher(
+          "FlushedSequenceIdFlusher", flushPeriod);
+      master.getChoreService().scheduleChore(flushedSeqIdFlusher);
+    }
+  }
+
+  /**
+   * Stop the ServerManager.
    */
   public void stop() {
-    if (connection != null) {
+    if (flushedSeqIdFlusher != null) {
+      flushedSeqIdFlusher.cancel();
+    }
+    if (persistFlushedSequenceId) {
       try {
-        connection.close();
+        persistRegionLastFlushedSequenceIds();
       } catch (IOException e) {
-        LOG.error("Attempt to close connection to master failed", e);
+        LOG.warn("Failed to persist last flushed sequence id of regions"
+            + " to file system", e);
       }
     }
   }
@@ -1056,6 +1121,159 @@ public class ServerManager {
   public void removeRegions(final List<RegionInfo> regions) {
     for (RegionInfo hri: regions) {
       removeRegion(hri);
+    }
+  }
+
+  /**
+   * May return 0 when server is not online.
+   */
+  public int getServerVersion(final ServerName serverName) {
+    ServerMetrics serverMetrics = onlineServers.get(serverName);
+    return serverMetrics != null ? serverMetrics.getVersionNumber() : 0;
+  }
+
+  public int getInfoPort(ServerName serverName) {
+    ServerMetrics serverMetrics = onlineServers.get(serverName);
+    return serverMetrics != null ? serverMetrics.getInfoServerPort() : 0;
+  }
+
+  /**
+   * Persist last flushed sequence id of each region to HDFS
+   * @throws IOException if persit to HDFS fails
+   */
+  private void persistRegionLastFlushedSequenceIds() throws IOException {
+    if (isFlushSeqIdPersistInProgress) {
+      return;
+    }
+    isFlushSeqIdPersistInProgress = true;
+    try {
+      Configuration conf = master.getConfiguration();
+      Path rootDir = FSUtils.getRootDir(conf);
+      Path lastFlushedSeqIdPath = new Path(rootDir, LAST_FLUSHED_SEQ_ID_FILE);
+      FileSystem fs = FileSystem.get(conf);
+      if (fs.exists(lastFlushedSeqIdPath)) {
+        LOG.info("Rewriting .lastflushedseqids file at: "
+            + lastFlushedSeqIdPath);
+        if (!fs.delete(lastFlushedSeqIdPath, false)) {
+          throw new IOException("Unable to remove existing "
+              + lastFlushedSeqIdPath);
+        }
+      } else {
+        LOG.info("Writing .lastflushedseqids file at: " + lastFlushedSeqIdPath);
+      }
+      FSDataOutputStream out = fs.create(lastFlushedSeqIdPath);
+      FlushedSequenceId.Builder flushedSequenceIdBuilder =
+          FlushedSequenceId.newBuilder();
+      try {
+        for (Entry<byte[], Long> entry : flushedSequenceIdByRegion.entrySet()) {
+          FlushedRegionSequenceId.Builder flushedRegionSequenceIdBuilder =
+              FlushedRegionSequenceId.newBuilder();
+          flushedRegionSequenceIdBuilder.setRegionEncodedName(
+              ByteString.copyFrom(entry.getKey()));
+          flushedRegionSequenceIdBuilder.setSeqId(entry.getValue());
+          ConcurrentNavigableMap<byte[], Long> storeSeqIds =
+              storeFlushedSequenceIdsByRegion.get(entry.getKey());
+          if (storeSeqIds != null) {
+            for (Entry<byte[], Long> store : storeSeqIds.entrySet()) {
+              FlushedStoreSequenceId.Builder flushedStoreSequenceIdBuilder =
+                  FlushedStoreSequenceId.newBuilder();
+              flushedStoreSequenceIdBuilder.setFamily(ByteString.copyFrom(store.getKey()));
+              flushedStoreSequenceIdBuilder.setSeqId(store.getValue());
+              flushedRegionSequenceIdBuilder.addStores(flushedStoreSequenceIdBuilder);
+            }
+          }
+          flushedSequenceIdBuilder.addRegionSequenceId(flushedRegionSequenceIdBuilder);
+        }
+        flushedSequenceIdBuilder.build().writeDelimitedTo(out);
+      } finally {
+        if (out != null) {
+          out.close();
+        }
+      }
+    } finally {
+      isFlushSeqIdPersistInProgress = false;
+    }
+  }
+
+  /**
+   * Load last flushed sequence id of each region from HDFS, if persisted
+   */
+  public void loadLastFlushedSequenceIds() throws IOException {
+    if (!persistFlushedSequenceId) {
+      return;
+    }
+    Configuration conf = master.getConfiguration();
+    Path rootDir = FSUtils.getRootDir(conf);
+    Path lastFlushedSeqIdPath = new Path(rootDir, LAST_FLUSHED_SEQ_ID_FILE);
+    FileSystem fs = FileSystem.get(conf);
+    if (!fs.exists(lastFlushedSeqIdPath)) {
+      LOG.info("No .lastflushedseqids found at" + lastFlushedSeqIdPath
+          + " will record last flushed sequence id"
+          + " for regions by regionserver report all over again");
+      return;
+    } else {
+      LOG.info("begin to load .lastflushedseqids at " + lastFlushedSeqIdPath);
+    }
+    FSDataInputStream in = fs.open(lastFlushedSeqIdPath);
+    try {
+      FlushedSequenceId flushedSequenceId =
+          FlushedSequenceId.parseDelimitedFrom(in);
+      for (FlushedRegionSequenceId flushedRegionSequenceId : flushedSequenceId
+          .getRegionSequenceIdList()) {
+        byte[] encodedRegionName = flushedRegionSequenceId
+            .getRegionEncodedName().toByteArray();
+        flushedSequenceIdByRegion
+            .putIfAbsent(encodedRegionName, flushedRegionSequenceId.getSeqId());
+        if (flushedRegionSequenceId.getStoresList() != null
+            && flushedRegionSequenceId.getStoresList().size() != 0) {
+          ConcurrentNavigableMap<byte[], Long> storeFlushedSequenceId =
+              computeIfAbsent(storeFlushedSequenceIdsByRegion, encodedRegionName,
+                () -> new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR));
+          for (FlushedStoreSequenceId flushedStoreSequenceId : flushedRegionSequenceId
+              .getStoresList()) {
+            storeFlushedSequenceId
+                .put(flushedStoreSequenceId.getFamily().toByteArray(),
+                    flushedStoreSequenceId.getSeqId());
+          }
+        }
+      }
+    } finally {
+      in.close();
+    }
+  }
+
+  /**
+   * Regions may have been removed between latest persist of FlushedSequenceIds
+   * and master abort. So after loading FlushedSequenceIds from file, and after
+   * meta loaded, we need to remove the deleted region according to RegionStates.
+   */
+  public void removeDeletedRegionFromLoadedFlushedSequenceIds() {
+    RegionStates regionStates = master.getAssignmentManager().getRegionStates();
+    Iterator<byte[]> it = flushedSequenceIdByRegion.keySet().iterator();
+    while(it.hasNext()) {
+      byte[] regionEncodedName = it.next();
+      if (regionStates.getRegionState(Bytes.toStringBinary(regionEncodedName)) == null) {
+        it.remove();
+        storeFlushedSequenceIdsByRegion.remove(regionEncodedName);
+      }
+    }
+  }
+
+
+  private class FlushedSequenceIdFlusher extends ScheduledChore {
+
+    public FlushedSequenceIdFlusher(String name, int p) {
+      super(name, master, p, 60 * 1000); //delay one minute before first execute
+    }
+
+    @Override
+    protected void chore() {
+      try {
+        persistRegionLastFlushedSequenceIds();
+      } catch (IOException e) {
+        LOG.debug("Failed to persist last flushed sequence id of regions"
+            + " to file system", e);
+      }
     }
   }
 }

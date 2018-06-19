@@ -1,5 +1,4 @@
-/*
- *
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.io;
 
 import static org.junit.Assert.assertEquals;
@@ -39,7 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Mutation;
@@ -62,10 +60,12 @@ import org.apache.hadoop.hbase.regionserver.MutableSegment;
 import org.apache.hadoop.hbase.regionserver.Segment;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker.NonSyncTimeRangeTracker;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker.SyncTimeRangeTracker;
+import org.apache.hadoop.hbase.regionserver.throttle.StoreHotnessProtector;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.ClassSize;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
@@ -77,6 +77,11 @@ import org.slf4j.LoggerFactory;
  */
 @Category({IOTests.class, SmallTests.class})
 public class TestHeapSize  {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestHeapSize.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestHeapSize.class);
   // List of classes implementing HeapSize
   // BatchOperation, BatchUpdate, BlockIndex, Entry, Entry<K,V>, HStoreKey
@@ -472,6 +477,14 @@ public class TestHeapSize  {
       assertEquals(expected, actual);
     }
 
+    cl = StoreHotnessProtector.class;
+    actual = StoreHotnessProtector.FIXED_SIZE;
+    expected = ClassSize.estimateBase(cl, false);
+    if (expected != actual) {
+      ClassSize.estimateBase(cl, true);
+      assertEquals(expected, actual);
+    }
+
     // Block cache key overhead. Only tests fixed overhead as estimating heap
     // size of strings is hard.
     cl = BlockCacheKey.class;
@@ -546,9 +559,9 @@ public class TestHeapSize  {
       assertTrue(ClassSize.OBJECT == 12 || ClassSize.OBJECT == 16); // depending on CompressedOops
     }
     if (ClassSize.useUnsafeLayout()) {
-      assertEquals(ClassSize.OBJECT + 4, ClassSize.ARRAY);
+      assertEquals(ClassSize.ARRAY, ClassSize.OBJECT + 4);
     } else {
-      assertEquals(ClassSize.OBJECT + 8, ClassSize.ARRAY);
+      assertEquals(ClassSize.ARRAY, ClassSize.OBJECT + 8);
     }
   }
 }

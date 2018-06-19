@@ -49,7 +49,7 @@ public abstract class BaseReplicationEndpoint extends AbstractService
     if (this.ctx != null){
       ReplicationPeer peer = this.ctx.getReplicationPeer();
       if (peer != null){
-        peer.trackPeerConfigChanges(this);
+        peer.registerPeerConfigListener(this);
       } else {
         LOG.warn("Not tracking replication peer config changes for Peer Id " + this.ctx.getPeerId() +
             " because there's no such peer");
@@ -84,7 +84,7 @@ public abstract class BaseReplicationEndpoint extends AbstractService
         for (String filterName : filterNames) {
           try {
             Class<?> clazz = Class.forName(filterName);
-            filters.add((WALEntryFilter) clazz.newInstance());
+            filters.add((WALEntryFilter) clazz.getDeclaredConstructor().newInstance());
           } catch (Exception e) {
             LOG.error("Unable to create WALEntryFilter " + filterName, e);
           }

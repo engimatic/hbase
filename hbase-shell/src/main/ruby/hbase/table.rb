@@ -19,9 +19,13 @@
 
 include Java
 
+java_import org.apache.hadoop.hbase.util.Bytes
+java_import org.apache.hadoop.hbase.client.RegionReplicaUtil
+
 # Wrapper for org.apache.hadoop.hbase.client.Table
 
 module Hbase
+  # rubocop:disable Metrics/ClassLength
   class Table
     include HBaseConstants
     @@thread_pool = nil
@@ -247,14 +251,12 @@ EOF
 
     #----------------------------------------------------------------------------------------------
     # Increment a counter atomically
+    # rubocop:disable Metrics/AbcSize, CyclomaticComplexity, MethodLength
     def _incr_internal(row, column, value = nil, args = {})
       value = 1 if value.is_a?(Hash)
       value ||= 1
       incr = org.apache.hadoop.hbase.client.Increment.new(row.to_s.to_java_bytes)
       family, qualifier = parse_column_name(column)
-      if qualifier.nil?
-        raise ArgumentError, 'Failed to provide both column family and column qualifier for incr'
-      end
       if args.any?
         attributes = args[ATTRIBUTES]
         visibility = args[VISIBILITY]
@@ -278,9 +280,6 @@ EOF
     def _append_internal(row, column, value, args = {})
       append = org.apache.hadoop.hbase.client.Append.new(row.to_s.to_java_bytes)
       family, qualifier = parse_column_name(column)
-      if qualifier.nil?
-        raise ArgumentError, 'Failed to provide both column family and column qualifier for append'
-      end
       if args.any?
         attributes = args[ATTRIBUTES]
         visibility = args[VISIBILITY]
@@ -298,6 +297,7 @@ EOF
       org.apache.hadoop.hbase.util.Bytes.toStringBinary(cell.getValueArray,
                                                         cell.getValueOffset, cell.getValueLength)
     end
+    # rubocop:enable Metrics/AbcSize, CyclomaticComplexity, MethodLength
 
     #----------------------------------------------------------------------------------------------
     # Count rows in a table
@@ -804,12 +804,13 @@ EOF
     # Get the split points for the table
     def _get_splits_internal
       locator = @table.getRegionLocator
-      splits = locator.getAllRegionLocations
-                      .map { |i| Bytes.toStringBinary(i.getRegionInfo.getStartKey) }.delete_if { |k| k == '' }
+      locator.getAllRegionLocations
+             .select { |s| RegionReplicaUtil.isDefaultReplica(s.getRegion) }
+             .map { |i| Bytes.toStringBinary(i.getRegionInfo.getStartKey) }
+             .delete_if { |k| k == '' }
+    ensure
       locator.close
-      puts(format('Total number of splits = %s', splits.size + 1))
-      puts splits
-      splits
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end

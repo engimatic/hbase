@@ -27,6 +27,7 @@ option optimize_for = SPEED;
 import "HBase.proto";
 import "RPC.proto";
 import "Snapshot.proto";
+import "Replication.proto";
 
 // ============================================================================
 //  WARNING - Compatibility rules
@@ -170,6 +171,7 @@ enum DisableTableState {
   DISABLE_TABLE_MARK_REGIONS_OFFLINE = 4;
   DISABLE_TABLE_SET_DISABLED_TABLE_STATE = 5;
   DISABLE_TABLE_POST_OPERATION = 6;
+  DISABLE_TABLE_ADD_REPLICATION_BARRIER = 7;
 }
 
 message DisableTableStateData {
@@ -240,11 +242,12 @@ enum SplitTableRegionState {
   SPLIT_TABLE_REGION_PRE_OPERATION = 2;
   SPLIT_TABLE_REGION_CLOSE_PARENT_REGION = 3;
   SPLIT_TABLE_REGION_CREATE_DAUGHTER_REGIONS = 4;
-  SPLIT_TABLE_REGION_PRE_OPERATION_BEFORE_META = 5;
-  SPLIT_TABLE_REGION_UPDATE_META = 6;
-  SPLIT_TABLE_REGION_PRE_OPERATION_AFTER_META = 7;
-  SPLIT_TABLE_REGION_OPEN_CHILD_REGIONS = 8;
-  SPLIT_TABLE_REGION_POST_OPERATION = 9;
+  SPLIT_TABLE_REGION_WRITE_MAX_SEQUENCE_ID_FILE = 5;
+  SPLIT_TABLE_REGION_PRE_OPERATION_BEFORE_META = 6;
+  SPLIT_TABLE_REGION_UPDATE_META = 7;
+  SPLIT_TABLE_REGION_PRE_OPERATION_AFTER_META = 8;
+  SPLIT_TABLE_REGION_OPEN_CHILD_REGIONS = 9;
+  SPLIT_TABLE_REGION_POST_OPERATION = 10;
 }
 
 message SplitTableRegionStateData {
@@ -259,11 +262,12 @@ enum MergeTableRegionsState {
   MERGE_TABLE_REGIONS_PRE_MERGE_OPERATION = 3;
   MERGE_TABLE_REGIONS_CLOSE_REGIONS = 4;
   MERGE_TABLE_REGIONS_CREATE_MERGED_REGION = 5;
-  MERGE_TABLE_REGIONS_PRE_MERGE_COMMIT_OPERATION = 6;
-  MERGE_TABLE_REGIONS_UPDATE_META = 7;
-  MERGE_TABLE_REGIONS_POST_MERGE_COMMIT_OPERATION = 8;
-  MERGE_TABLE_REGIONS_OPEN_MERGED_REGION = 9;
-  MERGE_TABLE_REGIONS_POST_OPERATION = 10;
+  MERGE_TABLE_REGIONS_WRITE_MAX_SEQUENCE_ID_FILE = 6;
+  MERGE_TABLE_REGIONS_PRE_MERGE_COMMIT_OPERATION = 7;
+  MERGE_TABLE_REGIONS_UPDATE_META = 8;
+  MERGE_TABLE_REGIONS_POST_MERGE_COMMIT_OPERATION = 9;
+  MERGE_TABLE_REGIONS_OPEN_MERGED_REGION = 10;
+  MERGE_TABLE_REGIONS_POST_OPERATION = 11;
 }
 
 message MergeTableRegionsStateData {
@@ -299,10 +303,12 @@ enum ServerCrashState {
   // Removed SERVER_CRASH_CALC_REGIONS_TO_ASSIGN = 7;
   SERVER_CRASH_ASSIGN = 8;
   SERVER_CRASH_WAIT_ON_ASSIGN = 9;
+  SERVER_CRASH_HANDLE_RIT2 = 20;
   SERVER_CRASH_FINISH = 100;
 }
 
 enum RecoverMetaState {
+  RECOVER_META_PREPARE = 0;
   RECOVER_META_SPLIT_LOGS = 1;
   RECOVER_META_ASSIGN_REGIONS = 2;
 }
@@ -318,6 +324,8 @@ message AssignRegionStateData {
   required RegionInfo region_info = 2;
   optional bool force_new_plan = 3 [default = false];
   optional ServerName target_server = 4;
+  // Current attempt index used for expotential backoff when stuck
+  optional int32 attempt = 5;
 }
 
 message UnassignRegionStateData {
@@ -330,9 +338,13 @@ message UnassignRegionStateData {
   // server we will send the unassign rpc too.
   optional ServerName hosting_server = 5;
   optional bool force = 4 [default = false];
+  optional bool remove_after_unassigning = 6 [default = false];
+  // Current attempt index used for expotential backoff when stuck
+  optional int32 attempt = 7;
 }
 
 enum MoveRegionState {
+  MOVE_REGION_PREPARE = 0;
   MOVE_REGION_UNASSIGN = 1;
   MOVE_REGION_ASSIGN = 2;
 }
@@ -364,4 +376,72 @@ message GCMergedRegionsStateData {
   required RegionInfo parent_a = 1;
   required RegionInfo parent_b = 2;
   required RegionInfo merged_child = 3;
+}
+
+enum PeerModificationState {
+  PRE_PEER_MODIFICATION = 1;
+  UPDATE_PEER_STORAGE = 2;
+  REFRESH_PEER_ON_RS = 3;
+  SERIAL_PEER_REOPEN_REGIONS = 4;
+  SERIAL_PEER_UPDATE_LAST_PUSHED_SEQ_ID = 5;
+  SERIAL_PEER_SET_PEER_ENABLED = 6;
+  SERIAL_PEER_ENABLE_PEER_REFRESH_PEER_ON_RS = 7;
+  POST_PEER_MODIFICATION = 8;
+}
+
+message PeerModificationStateData {
+  required string peer_id = 1;
+}
+
+enum PeerModificationType {
+  ADD_PEER = 1;
+  REMOVE_PEER = 2;
+  ENABLE_PEER = 3;
+  DISABLE_PEER = 4;
+  UPDATE_PEER_CONFIG = 5;
+}
+
+message RefreshPeerStateData {
+  required string peer_id = 1;
+  required PeerModificationType type = 2;
+  required ServerName target_server = 3;
+}
+
+message RefreshPeerParameter {
+  required string peer_id = 1;
+  required PeerModificationType type = 2;
+  required ServerName target_server = 3;
+}
+
+message PeerProcedureStateData {
+  required string peer_id = 1;
+}
+
+message AddPeerStateData {
+  required ReplicationPeer peer_config = 1;
+  required bool enabled = 2;
+}
+
+message UpdatePeerConfigStateData {
+  required ReplicationPeer peer_config = 1;
+  optional ReplicationPeer old_peer_config = 2;
+  required bool enabled = 3;
+}
+
+message RemovePeerStateData {
+  optional ReplicationPeer peer_config = 1;
+}
+
+message EnablePeerStateData {
+}
+
+message DisablePeerStateData {
+}
+
+enum ReopenTableRegionsState {
+  REOPEN_TABLE_REGIONS_REOPEN_ALL_REGIONS = 1;
+}
+
+message ReopenTableRegionsStateData {
+  required TableName table_name = 1;
 }

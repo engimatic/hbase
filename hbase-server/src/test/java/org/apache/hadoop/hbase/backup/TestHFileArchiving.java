@@ -25,13 +25,13 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.master.cleaner.HFileCleaner;
 import org.apache.hadoop.hbase.regionserver.CompactingMemStore;
@@ -50,6 +50,7 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -63,6 +64,10 @@ import org.slf4j.LoggerFactory;
  */
 @Category({MediumTests.class, MiscTests.class})
 public class TestHFileArchiving {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestHFileArchiving.class);
 
   private static final Logger LOG = LoggerFactory.getLogger(TestHFileArchiving.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
@@ -370,6 +375,7 @@ public class TestHFileArchiving {
 
     // The cleaner should be looping without long pauses to reproduce the race condition.
     HFileCleaner cleaner = new HFileCleaner(1, stoppable, conf, fs, archiveDir);
+    assertFalse("cleaner should not be null", cleaner == null);
     try {
       choreService.scheduleChore(cleaner);
 
@@ -419,9 +425,9 @@ public class TestHFileArchiving {
 
   /**
    * Get the names of all the files below the given directory
-   * @param fs
-   * @param archiveDir
-   * @return
+   * @param fs the file system to inspect
+   * @param archiveDir the directory in which to look
+   * @return a list of all files in the directory and sub-directories
    * @throws IOException
    */
   private List<String> getAllFileNames(final FileSystem fs, Path archiveDir) throws IOException {

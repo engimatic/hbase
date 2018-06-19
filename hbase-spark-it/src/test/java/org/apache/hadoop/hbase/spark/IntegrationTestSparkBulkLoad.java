@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-import org.apache.commons.cli.CommandLine;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -73,6 +72,7 @@ import org.slf4j.LoggerFactory;
 import scala.Tuple2;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
 
 /**
  * Test Bulk Load and Spark on a distributed cluster.
@@ -319,7 +319,7 @@ public class IntegrationTestSparkBulkLoad extends IntegrationTestBase {
       PairFlatMapFunction<Tuple2<ImmutableBytesWritable, Result>, SparkLinkKey, SparkLinkChain> {
 
     @Override
-    public Iterable<Tuple2<SparkLinkKey, SparkLinkChain>> call(Tuple2<ImmutableBytesWritable,
+    public Iterator<Tuple2<SparkLinkKey, SparkLinkChain>> call(Tuple2<ImmutableBytesWritable,
             Result> v) throws Exception {
       Result value = v._2();
       long longRk = Bytes.toLong(value.getRow());
@@ -334,7 +334,7 @@ public class IntegrationTestSparkBulkLoad extends IntegrationTestBase {
             new Tuple2<>(new SparkLinkKey(chainId, order), new SparkLinkChain(longRk, next));
         list.add(tuple2);
       }
-      return list;
+      return list.iterator();
     }
   }
 

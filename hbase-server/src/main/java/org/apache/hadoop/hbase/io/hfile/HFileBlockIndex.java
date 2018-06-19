@@ -266,7 +266,7 @@ public class HFileBlockIndex {
 
         // Adding blockKeys
         for (Cell key : blockKeys) {
-          heapSize += ClassSize.align(PrivateCellUtil.estimatedHeapSizeOf(key));
+          heapSize += ClassSize.align(PrivateCellUtil.estimatedSizeOfCell(key));
         }
       }
       // Add comparator and the midkey atomicreference
@@ -1481,7 +1481,7 @@ public class HFileBlockIndex {
      * The same as {@link #add(byte[], long, int, long)} but does not take the
      * key/value into account. Used for single-level indexes.
      *
-     * @see {@link #add(byte[], long, int, long)}
+     * @see #add(byte[], long, int, long)
      */
     public void add(byte[] firstKey, long blockOffset, int onDiskDataSize) {
       add(firstKey, blockOffset, onDiskDataSize, -1);

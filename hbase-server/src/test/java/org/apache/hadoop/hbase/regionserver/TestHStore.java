@@ -21,7 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -47,7 +47,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -62,10 +61,10 @@ import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.MemoryCompactionPolicy;
 import org.apache.hadoop.hbase.PrivateCellUtil;
@@ -73,6 +72,8 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
@@ -86,6 +87,7 @@ import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+import org.apache.hadoop.hbase.quotas.RegionSizeStoreImpl;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionConfiguration;
 import org.apache.hadoop.hbase.regionserver.compactions.DefaultCompactor;
 import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher;
@@ -105,6 +107,7 @@ import org.apache.hadoop.util.Progressable;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -112,6 +115,7 @@ import org.junit.rules.TestName;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
@@ -119,6 +123,11 @@ import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
  */
 @Category({ RegionServerTests.class, MediumTests.class })
 public class TestHStore {
+
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestHStore.class);
+
   private static final Logger LOG = LoggerFactory.getLogger(TestHStore.class);
   @Rule
   public TestName name = new TestName();
@@ -195,7 +204,7 @@ public class TestHStore {
 
   private void initHRegion(String methodName, Configuration conf, TableDescriptorBuilder builder,
       ColumnFamilyDescriptor hcd, MyStoreHook hook, boolean switchToPread) throws IOException {
-    TableDescriptor htd = builder.addColumnFamily(hcd).build();
+    TableDescriptor htd = builder.setColumnFamily(hcd).build();
     Path basedir = new Path(DIR + methodName);
     Path tableDir = FSUtils.getTableDir(basedir, htd.getTableName());
     final Path logdir = new Path(basedir, AbstractFSWALProvider.getWALDirectoryName(methodName));
@@ -205,12 +214,12 @@ public class TestHStore {
     fs.delete(logdir, true);
     ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false,
       MemStoreLABImpl.CHUNK_SIZE_DEFAULT, 1, 0, null);
-    HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
+    RegionInfo info = RegionInfoBuilder.newBuilder(htd.getTableName()).build();
     Configuration walConf = new Configuration(conf);
     FSUtils.setRootDir(walConf, basedir);
-    WALFactory wals = new WALFactory(walConf, null, methodName);
-    region = new HRegion(new HRegionFileSystem(conf, fs, tableDir, info),
-        wals.getWAL(info.getEncodedNameAsBytes(), info.getTable().getNamespace()), conf, htd, null);
+    WALFactory wals = new WALFactory(walConf, methodName);
+    region = new HRegion(new HRegionFileSystem(conf, fs, tableDir, info), wals.getWAL(info), conf,
+        htd, null);
   }
 
   private HStore init(String methodName, Configuration conf, TableDescriptorBuilder builder,
@@ -231,9 +240,8 @@ public class TestHStore {
    */
   @Test
   public void testFlushSizeSizing() throws Exception {
-    LOG.info("Setting up a faulty file system that cannot write in " +
-      this.name.getMethodName());
-    final Configuration conf = HBaseConfiguration.create();
+    LOG.info("Setting up a faulty file system that cannot write in " + this.name.getMethodName());
+    final Configuration conf = HBaseConfiguration.create(TEST_UTIL.getConfiguration());
     // Only retry once.
     conf.setInt("hbase.hstore.flush.retries.number", 1);
     User user = User.createUserForTesting(conf, this.name.getMethodName(),
@@ -251,15 +259,15 @@ public class TestHStore {
         // Initialize region
         init(name.getMethodName(), conf);
 
-        MemStoreSize size = store.memstore.getFlushableSize();
-        assertEquals(0, size.getDataSize());
+        MemStoreSize mss = store.memstore.getFlushableSize();
+        assertEquals(0, mss.getDataSize());
         LOG.info("Adding some data");
-        MemStoreSizing kvSize = new MemStoreSizing();
+        MemStoreSizing kvSize = new NonThreadSafeMemStoreSizing();
         store.add(new KeyValue(row, family, qf1, 1, (byte[]) null), kvSize);
         // add the heap size of active (mutable) segment
-        kvSize.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD);
-        size = store.memstore.getFlushableSize();
-        assertEquals(kvSize, size);
+        kvSize.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD, 0);
+        mss = store.memstore.getFlushableSize();
+        assertEquals(kvSize.getMemStoreSize(), mss);
         // Flush.  Bug #1 from HBASE-10466.  Make sure size calculation on failed flush is right.
         try {
           LOG.info("Flushing");
@@ -270,24 +278,24 @@ public class TestHStore {
         }
         // due to snapshot, change mutable to immutable segment
         kvSize.incMemStoreSize(0,
-            CSLMImmutableSegment.DEEP_OVERHEAD_CSLM-MutableSegment.DEEP_OVERHEAD);
-        size = store.memstore.getFlushableSize();
-        assertEquals(kvSize, size);
-        MemStoreSizing kvSize2 = new MemStoreSizing();
+            CSLMImmutableSegment.DEEP_OVERHEAD_CSLM-MutableSegment.DEEP_OVERHEAD, 0);
+        mss = store.memstore.getFlushableSize();
+        assertEquals(kvSize.getMemStoreSize(), mss);
+        MemStoreSizing kvSize2 = new NonThreadSafeMemStoreSizing();
         store.add(new KeyValue(row, family, qf2, 2, (byte[])null), kvSize2);
-        kvSize2.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD);
+        kvSize2.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD, 0);
         // Even though we add a new kv, we expect the flushable size to be 'same' since we have
         // not yet cleared the snapshot -- the above flush failed.
-        assertEquals(kvSize, size);
+        assertEquals(kvSize.getMemStoreSize(), mss);
         ffs.fault.set(false);
         flushStore(store, id++);
-        size = store.memstore.getFlushableSize();
+        mss = store.memstore.getFlushableSize();
         // Size should be the foreground kv size.
-        assertEquals(kvSize2, size);
+        assertEquals(kvSize2.getMemStoreSize(), mss);
         flushStore(store, id++);
-        size = store.memstore.getFlushableSize();
-        assertEquals(0, size.getDataSize());
-        assertEquals(MutableSegment.DEEP_OVERHEAD, size.getHeapSize());
+        mss = store.memstore.getFlushableSize();
+        assertEquals(0, mss.getDataSize());
+        assertEquals(MutableSegment.DEEP_OVERHEAD, mss.getHeapSize());
         return null;
       }
     });
@@ -660,7 +668,7 @@ public class TestHStore {
   public void testHandleErrorsInFlush() throws Exception {
     LOG.info("Setting up a faulty file system that cannot write");
 
-    final Configuration conf = HBaseConfiguration.create();
+    final Configuration conf = HBaseConfiguration.create(TEST_UTIL.getConfiguration());
     User user = User.createUserForTesting(conf,
         "testhandleerrorsinflush", new String[]{"foo"});
     // Inject our faulty LocalFileSystem
@@ -755,7 +763,7 @@ public class TestHStore {
     }
 
     @Override
-    public void write(byte[] buf, int offset, int length) throws IOException {
+    public synchronized void write(byte[] buf, int offset, int length) throws IOException {
       System.err.println("faulty stream write at pos " + getPos());
       injectFault();
       super.write(buf, offset, length);
@@ -1006,7 +1014,6 @@ public class TestHStore {
     assertEquals(0, this.store.getStorefilesCount());
   }
 
-  @SuppressWarnings("unchecked")
   @Test
   public void testRefreshStoreFilesNotChanged() throws IOException {
     init(name.getMethodName());
@@ -1218,7 +1225,7 @@ public class TestHStore {
     byte[] value0 = Bytes.toBytes("value0");
     byte[] value1 = Bytes.toBytes("value1");
     byte[] value2 = Bytes.toBytes("value2");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     init(name.getMethodName(), conf, TableDescriptorBuilder.newBuilder(TableName.valueOf(table)),
@@ -1277,7 +1284,7 @@ public class TestHStore {
     init(name.getMethodName(), conf, ColumnFamilyDescriptorBuilder.newBuilder(family)
         .setInMemoryCompaction(MemoryCompactionPolicy.BASIC).build());
     byte[] value = Bytes.toBytes("value");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1355,7 +1362,7 @@ public class TestHStore {
     });
     byte[] oldValue = Bytes.toBytes("oldValue");
     byte[] currentValue = Bytes.toBytes("currentValue");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1458,7 +1465,7 @@ public class TestHStore {
    * @throws IOException
    * @throws InterruptedException
    */
-  @Test (timeout=30000)
+  @Test
   public void testRunDoubleMemStoreCompactors() throws IOException, InterruptedException {
     int flushSize = 500;
     Configuration conf = HBaseConfiguration.create();
@@ -1471,7 +1478,7 @@ public class TestHStore {
     init(name.getMethodName(), conf, ColumnFamilyDescriptorBuilder.newBuilder(family)
         .setInMemoryCompaction(MemoryCompactionPolicy.BASIC).build());
     byte[] value = Bytes.toBytes("thisisavarylargevalue");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1551,7 +1558,7 @@ public class TestHStore {
       ColumnFamilyDescriptorBuilder.newBuilder(family).setMaxVersions(5).build(), hook);
   }
 
-  private class MyStore extends HStore {
+  private static class MyStore extends HStore {
     private final MyStoreHook hook;
 
     MyStore(final HRegion region, final ColumnFamilyDescriptor family, final Configuration
@@ -1576,7 +1583,7 @@ public class TestHStore {
     }
   }
 
-  private abstract class MyStoreHook {
+  private abstract static class MyStoreHook {
 
     void getScanners(MyStore store) throws IOException {
     }
@@ -1593,9 +1600,9 @@ public class TestHStore {
     conf.setLong(StoreScanner.STORESCANNER_PREAD_MAX_BYTES, 0);
     // Set the lower threshold to invoke the "MERGE" policy
     MyStore store = initMyStore(name.getMethodName(), conf, new MyStoreHook() {});
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = System.currentTimeMillis();
-    long seqID = 1l;
+    long seqID = 1L;
     // Add some data to the region and do some flushes
     for (int i = 1; i < 10; i++) {
       store.add(createCell(Bytes.toBytes("row" + i), qf1, ts, seqID++, Bytes.toBytes("")),
@@ -1651,6 +1658,56 @@ public class TestHStore {
     assertFalse(heap.equals(heap2));
   }
 
+  @Test
+  public void testSpaceQuotaChangeAfterReplacement() throws IOException {
+    final TableName tn = TableName.valueOf(name.getMethodName());
+    init(name.getMethodName());
+
+    RegionSizeStoreImpl sizeStore = new RegionSizeStoreImpl();
+
+    HStoreFile sf1 = mockStoreFileWithLength(1024L);
+    HStoreFile sf2 = mockStoreFileWithLength(2048L);
+    HStoreFile sf3 = mockStoreFileWithLength(4096L);
+    HStoreFile sf4 = mockStoreFileWithLength(8192L);
+
+    RegionInfo regionInfo = RegionInfoBuilder.newBuilder(tn).setStartKey(Bytes.toBytes("a"))
+        .setEndKey(Bytes.toBytes("b")).build();
+
+    // Compacting two files down to one, reducing size
+    sizeStore.put(regionInfo, 1024L + 4096L);
+    store.updateSpaceQuotaAfterFileReplacement(
+        sizeStore, regionInfo, Arrays.asList(sf1, sf3), Arrays.asList(sf2));
+
+    assertEquals(2048L, sizeStore.getRegionSize(regionInfo).getSize());
+
+    // The same file length in and out should have no change
+    store.updateSpaceQuotaAfterFileReplacement(
+        sizeStore, regionInfo, Arrays.asList(sf2), Arrays.asList(sf2));
+
+    assertEquals(2048L, sizeStore.getRegionSize(regionInfo).getSize());
+
+    // Increase the total size used
+    store.updateSpaceQuotaAfterFileReplacement(
+        sizeStore, regionInfo, Arrays.asList(sf2), Arrays.asList(sf3));
+
+    assertEquals(4096L, sizeStore.getRegionSize(regionInfo).getSize());
+
+    RegionInfo regionInfo2 = RegionInfoBuilder.newBuilder(tn).setStartKey(Bytes.toBytes("b"))
+        .setEndKey(Bytes.toBytes("c")).build();
+    store.updateSpaceQuotaAfterFileReplacement(sizeStore, regionInfo2, null, Arrays.asList(sf4));
+
+    assertEquals(8192L, sizeStore.getRegionSize(regionInfo2).getSize());
+  }
+
+  private HStoreFile mockStoreFileWithLength(long length) {
+    HStoreFile sf = mock(HStoreFile.class);
+    StoreFileReader sfr = mock(StoreFileReader.class);
+    when(sf.isHFile()).thenReturn(true);
+    when(sf.getReader()).thenReturn(sfr);
+    when(sfr.length()).thenReturn(length);
+    return sf;
+  }
+
   private static class MyThread extends Thread {
     private StoreScanner scanner;
     private KeyValueHeap heap;
@@ -1663,6 +1720,7 @@ public class TestHStore {
       return this.heap;
     }
 
+    @Override
     public void run() {
       scanner.trySwitchToStreamRead();
       heap = scanner.heap;

@@ -156,7 +156,13 @@ public interface LoadBalancer extends Configurable, Stoppable, ConfigurationObse
    * Notification that config has changed
    * @param conf
    */
+  @Override
   void onConfigurationChange(Configuration conf);
+
+  /**
+   * If balancer needs to do initialization after Master has started up, lets do that here.
+   */
+  void postMasterStartupInitialize();
 
   /**
    * @return true if Master carries regions

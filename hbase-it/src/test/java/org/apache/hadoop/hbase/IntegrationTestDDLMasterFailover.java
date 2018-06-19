@@ -53,12 +53,12 @@ import org.slf4j.LoggerFactory;
 
 /**
  *
- * Integration test that verifies Procedure V2. <br/><br/>
+ * Integration test that verifies Procedure V2.
  *
  * DDL operations should go through (rollforward or rollback) when primary master is killed by
- * ChaosMonkey (default MASTER_KILLING)<br/><br/>
+ * ChaosMonkey (default MASTER_KILLING).
  *
- * Multiple Worker threads are started to randomly do the following Actions in loops:<br/>
+ * <p></p>Multiple Worker threads are started to randomly do the following Actions in loops:
  * Actions generating and populating tables:
  * <ul>
  *     <li>CreateTableAction</li>
@@ -440,7 +440,7 @@ public class IntegrationTestDDLMasterFailover extends IntegrationTestBase {
       String tableName = String.format("ittable-%010d", RandomUtils.nextInt());
       String familyName = "cf-" + Math.abs(RandomUtils.nextInt());
       return TableDescriptorBuilder.newBuilder(TableName.valueOf(tableName))
-          .addColumnFamily(ColumnFamilyDescriptorBuilder.of(familyName))
+          .setColumnFamily(ColumnFamilyDescriptorBuilder.of(familyName))
           .build();
     }
   }
@@ -698,8 +698,9 @@ public class IntegrationTestDDLMasterFailover extends IntegrationTestBase {
       try {
         TableName tableName = selected.getTableName();
         // possible DataBlockEncoding ids
-        int[] possibleIds = {0, 2, 3, 4, 6};
-        short id = (short) possibleIds[RandomUtils.nextInt(0, possibleIds.length)];
+        DataBlockEncoding[] possibleIds = {DataBlockEncoding.NONE, DataBlockEncoding.PREFIX,
+                DataBlockEncoding.DIFF, DataBlockEncoding.FAST_DIFF, DataBlockEncoding.ROW_INDEX_V1};
+        short id = possibleIds[RandomUtils.nextInt(0, possibleIds.length)].getId();
         LOG.info("Altering encoding of column family: " + columnDesc + " to: " + id +
             " in table: " + tableName);
 

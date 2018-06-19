@@ -617,6 +617,11 @@ possible configurations would overwhelm and obscure the important.
     <description>Period at which the region normalizer runs in the Master.</description>
   </property>
   <property>
+    <name>hbase.normalizer.min.region.count</name>
+    <value>3</value>
+    <description>configure the minimum number of regions</description>
+  </property>
+  <property>
     <name>hbase.regions.slop</name>
     <value>0.001</value>
     <description>Rebalance if any regionserver has average + (average * slop) regions.
@@ -1659,19 +1664,6 @@ possible configurations would overwhelm and obscure the important.
         default of 10 will rarely need to be changed.
     </description>
   </property>
-  <property>
-    <name>hbase.serial.replication.waitingMs</name>
-    <value>10000</value>
-    <description>
-      By default, in replication we can not make sure the order of operations in slave cluster is
-      same as the order in master. If set REPLICATION_SCOPE to 2, we will push edits by the order
-      of written. This configuration is to set how long (in ms) we will wait before next checking if
-      a log can NOT be pushed because there are some logs written before it that have yet to be
-      pushed. A larger waiting will decrease the number of queries on hbase:meta but will enlarge
-      the delay of replication. This feature relies on zk-less assignment, so users must set
-      hbase.assignment.usezk to false to support it.
-    </description>
-  </property>
   <!-- Static Web User Filter properties. -->
   <property>
     <name>hbase.http.staticuser.user</name>
@@ -1801,5 +1793,11 @@ possible configurations would overwhelm and obscure the important.
     <description>
       Number of rows in a batch operation above which a warning will be logged.
     </description>
+  </property>
+  <property>
+    <name>hbase.master.wait.on.service.seconds</name>
+    <value>30</value>
+    <description>Default is 5 minutes. Make it 30 seconds for tests. See
+    HBASE-19794 for some context.</description>
   </property>
 </configuration>
